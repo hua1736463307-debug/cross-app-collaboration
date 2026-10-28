@@ -2,6 +2,7 @@
   "name": "cross-app-collaboration",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
   "description": "本地跨应用协作系统",
   "repository": {
