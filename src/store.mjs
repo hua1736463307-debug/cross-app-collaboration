@@ -7,6 +7,8 @@ export class HubError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
 }
 const ACTIVE = new Set(['planning', 'implementing', 'diagnosing', 'fixing']);
+const OPEN_DISPATCH = new Set(['launching', 'running', 'uncertain']);
+const QUEUES = { codex: ['planning_queue', 'blocked', 'codex_fix_queue'], workbuddy: ['ready'] };
 const stamp = () => new Date().toISOString();
 const text = (value, label, max = 100000) => {
   if (typeof value !== 'string' || !value.trim()) throw new HubError(label + '不能为空');
@@ -15,7 +17,7 @@ const text = (value, label, max = 100000) => {
 };
 const cleanTask = task => {
   const { leaseId, resumeStatus, ...result } = task;
-  return result;
+  return { ...result, autoEnabled: task.autoEnabled === true };
 };
 
 export class Store {
@@ -27,7 +29,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, last_seen TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, last_seen TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS dispatches(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS settings(id TEXT PRIMARY KEY, value TEXT NOT NULL);`);
     this.tx(() => {
       for (const task of this.all('tasks')) {
         if (ACTIVE.has(task.status)) {
@@ -37,6 +41,9 @@ export class Store {
           this.save(task);
           this.event(task.id, 'recovery', 'system', '服务重新启动。请确认原执行端已停止，再决定重试或接手。');
         }
+      }
+      for (const run of this.all('dispatches')) {
+        if (['launching', 'running'].includes(run.state)) this.uncertainDispatch(run, '服务重启，自动执行结果不确定；请确认原进程与子任务已停止。');
       }
     });
   }
@@ -57,6 +64,118 @@ export class Store {
     const row = this.db.prepare('SELECT body FROM projects WHERE id=?').get(id);
     if (!row) throw new HubError('项目不存在', 404);
     return JSON.parse(row.body);
+  }
+  schedulerState() {
+    return { enabled: this.db.prepare('SELECT value FROM settings WHERE id=?').get('schedulerEnabled')?.value === 'true', runs: this.all('dispatches') };
+  }
+  setSchedulerEnabled(enabled) {
+    if (typeof enabled !== 'boolean') throw new HubError('调度开关必须为布尔值');
+    return this.tx(() => {
+      this.db.prepare('INSERT INTO settings(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run('schedulerEnabled', String(enabled));
+      this.event(null, 'scheduler_toggle', 'human', enabled ? '自动调度已启用；仅执行明确开启自动协作的任务。' : '自动调度已关闭；不再派发新任务，已有进程不被强制停止。');
+      return this.schedulerState();
+    });
+  }
+  openDispatches() { return this.all('dispatches').filter(run => OPEN_DISPATCH.has(run.state)); }
+  getDispatch(id) {
+    const row = this.db.prepare('SELECT body FROM dispatches WHERE id=?').get(id);
+    if (!row) throw new HubError('调度记录不存在', 404);
+    return JSON.parse(row.body);
+  }
+  saveDispatch(run) {
+    this.db.prepare('UPDATE dispatches SET body=? WHERE id=?').run(JSON.stringify(run), run.id);
+  }
+  overlap(projectId, otherProjectId) {
+    const normalize = p => (process.platform === 'win32' ? p.toLowerCase() : p).replace(/[\\/]+$/, '');
+    const a = normalize(this.getProject(projectId).path), b = normalize(this.getProject(otherProjectId).path);
+    return a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep);
+  }
+  setTaskAutomation(id, enabled) {
+    if (typeof enabled !== 'boolean') throw new HubError('自动协作开关必须为布尔值');
+    return this.tx(() => {
+      const task = this.getTask(id), run = this.openDispatches().find(item => item.taskId === id);
+      if (enabled && (task.owner || run || !Object.values(QUEUES).flat().includes(task.status))) throw new HubError('请先处理当前执行或人工状态，再启用自动协作', 409);
+      task.autoEnabled = enabled;
+      if (!enabled && ACTIVE.has(task.status)) {
+        if (!task.pauseRequested) task.pauseRequestedAt = stamp();
+        task.pauseRequested = true;
+      }
+      this.save(task);
+      if (!enabled && run && !task.owner && !run.handedOff && run.state !== 'uncertain') this.uncertainDispatch(run, '任务自动协作已关闭，但启动已派发；请核对执行端已经停止。');
+      this.event(id, 'automation_toggle', 'human', enabled ? '本任务允许自动规划、实施和阻塞诊断，成果仍需人工验收。' : '本任务自动协作已关闭；活跃执行已请求暂停。');
+      return cleanTask(this.getTask(id));
+    });
+  }
+  reserveDispatch(actor) {
+    if (!Object.hasOwn(QUEUES, actor)) throw new HubError('未知客户端', 403);
+    this.expire();
+    return this.tx(() => {
+      if (!this.schedulerState().enabled || this.openDispatches().length) return null;
+      const tasks = this.all('tasks');
+      const task = tasks.find(t => t.autoEnabled === true && !t.owner && !t.pauseRequested && QUEUES[actor].includes(t.status) &&
+        !tasks.some(other => other.owner && this.overlap(t.projectId, other.projectId)));
+      if (!task) return null;
+      const run = { id: randomUUID(), taskId: task.id, actor, sourceStatus: task.status, revision: task.revision,
+        state: 'launching', startedAt: stamp(), claimedAt: null, pid: null, handedOff: false, finishedAt: null, error: null };
+      this.db.prepare('INSERT INTO dispatches(id,body) VALUES(?,?)').run(run.id, JSON.stringify(run));
+      this.event(task.id, 'dispatch_reserved', 'system', '已预约 ' + actor + ' 自动执行；等待客户端领取。');
+      return run;
+    });
+  }
+  markDispatchStarted(id, pid) {
+    if (!Number.isInteger(pid) || pid <= 0) throw new HubError('进程 ID 无效');
+    return this.tx(() => {
+      const run = this.getDispatch(id);
+      if (run.state !== 'launching') throw new HubError('当前调度不能标记为启动', 409);
+      run.state = 'running'; run.pid = pid; this.saveDispatch(run);
+      this.event(run.taskId, 'dispatch_started', 'system', '启动器已启动；等待真实任务交接。');
+      return run;
+    });
+  }
+  uncertainDispatch(run, reason) {
+    if (!OPEN_DISPATCH.has(run.state)) return run;
+    const task = this.getTask(run.taskId);
+    run.state = 'uncertain'; run.error = String(reason || '自动执行结果不确定').slice(0, 2000);
+    if (task.status !== 'needs_human') {
+      task.resumeStatus = ACTIVE.has(task.status) ? this.queueFor(task) : task.status;
+    }
+    task.status = 'needs_human'; task.pauseRequested = true; task.autoEnabled = false;
+    this.save(task); this.saveDispatch(run);
+    this.event(task.id, 'dispatch_uncertain', 'system', run.error + ' 调度预约保留，禁止自动重派。');
+    return run;
+  }
+  failDispatch(id, reason) {
+    return this.tx(() => this.uncertainDispatch(this.getDispatch(id), reason));
+  }
+  finishDispatch(id, { code, error } = {}) {
+    return this.tx(() => {
+      const run = this.getDispatch(id);
+      if (!['launching', 'running'].includes(run.state)) return run;
+      if (code !== 0 || !run.handedOff) return this.uncertainDispatch(run, error || (code === 0 ? '进程已退出，但未收到本轮 MCP 交接。' : '执行进程异常退出。'));
+      run.state = 'finished'; run.finishedAt = stamp(); run.error = null; run.exitCode = code;
+      this.saveDispatch(run); this.event(run.taskId, 'dispatch_finished', 'system', '本轮 MCP 交接已确认，执行进程已退出。');
+      return run;
+    });
+  }
+  resolveDispatch(id, { stopped } = {}) {
+    if (stopped !== true) throw new HubError('请先确认原进程及相关子任务已停止');
+    return this.tx(() => {
+      const run = this.getDispatch(id);
+      if (run.state !== 'uncertain') throw new HubError('仅结果不确定的调度可人工释放', 409);
+      run.state = 'resolved'; run.finishedAt = stamp(); this.saveDispatch(run);
+      this.event(run.taskId, 'dispatch_resolved', 'human', '人工确认原执行及子任务已停止，释放调度预约；任务仍需人工重新安排。');
+      return run;
+    });
+  }
+  expireDispatches({ claimMs = 120000, runMs = 1800000 } = {}) {
+    if (![claimMs, runMs].every(value => Number.isFinite(value) && value > 0)) throw new HubError('调度超时必须为正数');
+    return this.tx(() => {
+      for (const run of this.all('dispatches')) {
+        if (!['launching', 'running'].includes(run.state)) continue;
+        const age = Date.now() - Date.parse(run.startedAt);
+        if ((!run.claimedAt && age > claimMs) || age > runMs) this.uncertainDispatch(run, !run.claimedAt ? '启动后未及时领取任务。' : '本轮自动执行超过时间上限。');
+      }
+    });
   }
   save(task) {
     task.updatedAt = stamp();
@@ -91,6 +210,7 @@ export class Store {
       acceptance: text(input.acceptance, '验收条件'), status: 'planning_queue',
       plan: '', summary: '', evidence: '', blockedCount: 0, maxRetries: retries, revision: 0,
       owner: null, leaseId: null, heartbeatAt: null, pauseRequested: false, resumeStatus: null,
+      autoEnabled: false,
       createdAt: stamp(), updatedAt: stamp()
     };
     return this.tx(() => {
@@ -112,6 +232,8 @@ export class Store {
           task.pauseRequested = true;
           this.save(task);
           this.event(task.id, 'heartbeat_lost', 'system', '心跳或暂停确认超时，保留任务占用；请确认停止后再重派。');
+          const run = this.openDispatches().find(item => item.taskId === task.id && item.state !== 'uncertain');
+          if (run) this.uncertainDispatch(run, '任务心跳或暂停确认超时。');
         }
       }
     });
@@ -159,25 +281,32 @@ export class Store {
     if (task.owner !== actor || !leaseId || task.leaseId !== leaseId || !ACTIVE.has(task.status))
       throw new HubError('任务租约无效或任务已转人工处理，请查看最新状态', 409);
   }
-  agent(actor, tool, args = {}) {
+  agent(actor, tool, args = {}, dispatchId = null) {
     if (!['codex', 'workbuddy'].includes(actor)) throw new HubError('未知客户端', 403);
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw new HubError('工具参数必须是对象');
     this.expire();
+    const dispatch = dispatchId ? this.getDispatch(dispatchId) : null;
+    if (dispatch && (dispatch.actor !== actor || (args.taskId && args.taskId !== dispatch.taskId))) throw new HubError('调度与客户端或任务不匹配', 403);
+    const readOnly = ['list_tasks', 'get_task'].includes(tool);
+    if (dispatch && !readOnly && (dispatch.handedOff || !['launching', 'running'].includes(dispatch.state))) throw new HubError('本轮调度已结束或需人工处理，不能继续执行', 409);
     this.seen(actor);
     if (tool === 'list_tasks') {
       const statuses = actor === 'codex' ? ['planning_queue', 'blocked', 'codex_fix_queue'] : ['ready'];
-      return { tasks: this.all('tasks').filter(t => statuses.includes(t.status) || t.owner === actor).map(cleanTask), projects: this.all('projects') };
+      return { tasks: this.all('tasks').filter(t => dispatch ? t.id === dispatch.taskId : statuses.includes(t.status) || t.owner === actor).map(cleanTask), projects: this.all('projects').filter(p => !dispatch || p.id === this.getTask(dispatch.taskId).projectId) };
     }
     if (tool === 'heartbeat' && !args.taskId) return { ok: true };
     const taskId = text(args.taskId, '任务 ID', 100);
     if (tool === 'get_task') return { task: cleanTask(this.getTask(taskId)), packet: this.packet(taskId) };
     return this.tx(() => {
       const task = this.getTask(taskId);
+      const reserved = this.openDispatches().find(run => run.taskId === taskId);
+      if (reserved && reserved.id !== dispatchId) throw new HubError('任务已被自动调度预约，请勿从其他会话领取或提交', 409);
       if (tool === 'claim_task') {
         const allowed = actor === 'codex'
           ? { planning_queue: 'planning', blocked: 'diagnosing', codex_fix_queue: 'fixing' }
           : { ready: 'implementing' };
-        if (!allowed[task.status] || task.owner) throw new HubError('当前任务不可由该应用领取', 409);
+        if (!allowed[task.status] || task.owner || task.pauseRequested) throw new HubError('当前任务不可由该应用领取', 409);
+        if (dispatch && (dispatch.sourceStatus !== task.status || dispatch.revision !== task.revision || dispatch.claimedAt)) throw new HubError('调度对应的任务版本或领取状态已变化', 409);
         const normalize = p => (process.platform === 'win32' ? p.toLowerCase() : p).replace(/[\\/]+$/, '');
         const targetPath = normalize(this.getProject(task.projectId).path);
         const busy = this.all('tasks').some(t => {
@@ -185,10 +314,11 @@ export class Store {
           const p = normalize(this.getProject(t.projectId).path);
           return p === targetPath || p.startsWith(targetPath + path.sep) || targetPath.startsWith(p + path.sep);
         });
-        if (busy) throw new HubError('该项目或重叠目录已有任务占用，请先完成交接', 409);
+        if (busy || this.openDispatches().some(run => run.id !== dispatchId && this.overlap(task.projectId, this.getTask(run.taskId).projectId))) throw new HubError('该项目或重叠目录已有任务占用，请先完成交接', 409);
         task.status = allowed[task.status]; task.owner = actor; task.leaseId = randomUUID();
         task.heartbeatAt = stamp(); task.pauseRequested = false;
         this.save(task); this.event(task.id, 'claimed', actor, '已领取任务，进入 ' + task.status + '。');
+        if (dispatch) { dispatch.claimedAt = stamp(); this.saveDispatch(dispatch); }
         return { task: cleanTask(task), leaseId: task.leaseId, packet: this.packet(task.id) };
       }
       this.lease(task, actor, args.leaseId);
@@ -221,6 +351,7 @@ export class Store {
         this.event(task.id, 'paused', actor, '执行端确认停止：' + task.summary);
       } else throw new HubError('未知工具', 404);
       this.save(task);
+      if (dispatch) { dispatch.handedOff = true; this.saveDispatch(dispatch); }
       return { task: cleanTask(task), packet: this.packet(task.id) };
     });
   }
@@ -228,6 +359,8 @@ export class Store {
     this.expire();
     return this.tx(() => {
       const task = this.getTask(id), action = input.action;
+      const dispatch = this.openDispatches().find(run => run.taskId === id);
+      if (dispatch && !['comment', 'request_pause'].includes(action)) throw new HubError('调度执行尚未确认结束；请先确认停止并释放不确定的调度预约', 409);
       if (action === 'comment') {
         this.event(id, 'comment', 'human', text(input.message, '备注'));
       } else if (action === 'approve') {
@@ -237,7 +370,10 @@ export class Store {
         this.event(id, 'approved', 'human', evidence);
       } else if (action === 'request_pause') {
         if (['done', 'paused', 'needs_human'].includes(task.status)) throw new HubError('当前状态不可请求暂停', 409);
-        if (ACTIVE.has(task.status)) {
+        if (dispatch && !task.owner && !dispatch.handedOff) {
+          this.uncertainDispatch(dispatch, '启动已经派发，暂停前需确认执行端停止。');
+          return cleanTask(this.getTask(id));
+        } else if (ACTIVE.has(task.status)) {
           if (!task.pauseRequested) task.pauseRequestedAt = stamp();
           task.pauseRequested = true;
           this.event(id, 'pause_requested', 'human', '已请求暂停，等待执行端停止写入并确认。');

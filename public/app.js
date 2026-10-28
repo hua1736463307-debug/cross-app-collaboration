@@ -17,12 +17,18 @@ const eventNames = {
   report_blocked: '报告阻塞', approved: '验收完成', pause_requested: '请求暂停',
   paused: '确认暂停', resumed: '恢复任务', retried: '重新安排', takeover: '交由 Codex 接手',
   revised: '修订计划', comment: '补充说明', recovered: '恢复检查',
-  stale: '连接超时', restart: '服务重启', timed_out: '连接超时'
+  stale: '连接超时', restart: '服务重启', timed_out: '连接超时',
+  scheduler_enabled: '开启调度', scheduler_disabled: '停止派发',
+  automation_enabled: '允许自动协作', automation_disabled: '关闭自动协作',
+  dispatch_reserved: '预约执行', dispatch_started: '启动执行', dispatch_finished: '执行会话结束',
+  dispatch_uncertain: '执行待核对', dispatch_resolved: '人工确认已停止',
+  scheduler_toggle: '调度开关', automation_toggle: '任务自动协作设置'
 };
 const titles = {
   tasks: ['任务工作台', '让计划与实施，有序衔接。', 'Codex 负责规划与诊断，WorkBuddy 负责实施，你掌握关键决定。'],
   projects: ['项目目录', '每个项目，都有清晰的协作边界。', '登记本机项目目录，让任务、计划和交接记录归属到同一个项目。'],
-  integration: ['应用接入', '连接你的协作应用。', '通过本地 MCP 桥接，让应用主动领取任务、报告阻塞并提交成果。']
+  integration: ['应用接入', '连接你的协作应用。', '通过本地 MCP 桥接，让应用主动领取任务、报告阻塞并提交成果。'],
+  scheduler: ['自动协作', '交接之后，让下一步自动开始。', '为指定任务启动独立执行会话，遇到不确定状态停下来，成果由你验收。']
 };
 let state = { projects: [], tasks: [], events: [], agents: [], meta: {} };
 let online = false;
@@ -32,6 +38,7 @@ let view = 'tasks';
 let filter = 'all';
 let selectedTask = null;
 let pendingAction = null;
+let pendingSchedulerAction = null;
 let integration = null;
 let toastTimer;
 let lastSnapshot = '';
@@ -66,6 +73,9 @@ function projectOf(task) {
 }
 function taskById(id) {
   return state.tasks.find(task => task.id === id);
+}
+function automaticActorName(actor) {
+  return state.scheduler?.adapters?.[actor]?.label || (actor === 'workbuddy' ? '自动实施端' : actorNames[actor] || '未知执行端');
 }
 function badge(status) {
   const [label, color] = statuses[status] || [status || '未知', ''];
@@ -117,7 +127,7 @@ function setOnline(success, error) {
   banner.classList.toggle('hidden', success);
   if (!success) banner.textContent = '无法连接本地服务。请保持启动窗口运行。' + (hasState ? '下方保留最后一次读取的数据，暂不能提交操作。' : '') + (error ? ' ' + error : '');
   $('#primary-action').disabled = !success;
-  $$('.detail-side .button[data-mutation]').forEach(node => { node.disabled = !success; });
+  $$('button[data-mutation]').forEach(node => { node.disabled = !success || node.dataset.unavailable === 'true'; });
 }
 async function refresh(force = false) {
   if (loading) return;
@@ -146,6 +156,7 @@ function renderAll() {
   renderAgents();
   renderActivity();
   renderProjects();
+  renderScheduler();
   if (selectedTask && $('#detail-dialog').open) renderDetail(selectedTask, true);
 }
 function renderProjectSelects() {
@@ -215,6 +226,7 @@ function renderTasks() {
     const info = element('div'); info.append(element('span', 'task-title', task.title));
     const meta = element('div', 'task-meta');
     meta.append(element('span', 'project-name', projectOf(task)?.name || '未知项目'), element('span', 'task-age', time(task.updatedAt, true)));
+    if (task.autoEnabled) meta.append(element('span', 'auto-label', '自动协作'));
     info.append(meta);
     row.append(info, badge(task.status), element('span', 'task-owner', actorNames[task.owner] || '等待领取'), element('span', 'task-arrow', '›'));
     return row;
@@ -255,7 +267,7 @@ function renderProjects() {
     const footer = element('div', 'project-card-footer');
     footer.append(element('span', '', tasks.length + ' 项任务 · ' + tasks.filter(task => task.status === 'done').length + ' 项完成'), button('查看任务 →', 'text-button', () => { $('#project-filter').value = project.id; setFilter('all'); navigate('tasks'); }));
     card.append(header, element('div', 'path', project.path), footer);
-    target.append(card);
+    return card;
   }));
 }
 function setFilter(next) {
@@ -277,10 +289,11 @@ function navigate(next) {
   for (const name of Object.keys(titles)) $('#' + name + '-view').classList.toggle('hidden', name !== view);
   $$('.nav-item').forEach(node => { node.classList.toggle('active', node.dataset.view === view); if (node.dataset.view === view) node.setAttribute('aria-current', 'page'); else node.removeAttribute('aria-current'); });
   const action = $('#primary-action');
-  action.classList.toggle('hidden', view === 'integration');
+  action.classList.toggle('hidden', ['integration', 'scheduler'].includes(view));
   action.textContent = view === 'projects' ? '＋ 添加项目' : '＋ 创建任务';
   if (location.hash !== '#' + view) history.replaceState(null, '', '#' + view);
   if (view === 'integration') renderIntegration();
+  if (view === 'scheduler') renderScheduler();
 }
 function prepareForm(id) {
   const dialog = $('#' + id);
@@ -359,7 +372,25 @@ function renderDetail(id, preserve = false) {
   if (['review', 'ready', 'blocked'].includes(task.status) && !task.owner) addAction('修订执行计划', 'revise');
   if (!['done', 'paused', 'needs_human'].includes(task.status) && !task.pauseRequested) addAction(activeStatuses.has(task.status) ? '请求执行端暂停' : '暂停任务', 'request_pause');
   addAction('添加说明', 'comment');
-  side.append(element('p', 'side-note', '操作只影响系统内的任务流转。执行应用需主动调用 MCP 工具；系统不会点击或唤醒桌面聊天。'));
+  const automation = element('section', 'task-automation');
+  const taskRuns = (state.scheduler?.runs || []).filter(run => run.taskId === id);
+  const canEnable = !task.owner && ['planning_queue', 'ready', 'blocked', 'codex_fix_queue'].includes(task.status)
+    && !taskRuns.some(run => ['launching', 'running', 'uncertain'].includes(run.state));
+  automation.append(element('h3', '', '自动协作'), element('span', 'status-badge ' + (task.autoEnabled ? 'teal' : ''), task.autoEnabled ? '此任务已授权' : '此任务未授权'));
+  if (task.autoEnabled || !['done', 'review'].includes(task.status)) {
+    const toggle = button(task.autoEnabled ? '关闭此任务自动协作' : '允许此任务自动协作', 'button secondary', () => openSchedulerAction({ type: 'task', taskId: id, enabled: !task.autoEnabled }));
+    toggle.dataset.mutation = 'true';
+    toggle.dataset.unavailable = String(!state.scheduler || (!task.autoEnabled && !canEnable));
+    toggle.disabled = !online || toggle.dataset.unavailable === 'true';
+    if (!task.autoEnabled && !canEnable) toggle.title = '请先处理当前执行或人工状态，将任务恢复到可领取队列。';
+    automation.append(toggle);
+  }
+  automation.append(element('p', 'side-note', task.autoEnabled
+    ? (state.scheduler?.enabled ? '全局调度已开启。可领取阶段会自动启动独立执行会话，结果仍需人工验收。' : '全局调度已停止，新执行会话暂不派发。')
+    : (canEnable ? '仅此任务明确授权后才会被自动派发；已有任务默认关闭。' : '请先处理当前执行或人工状态，将任务恢复到可领取队列，再允许自动协作。')));
+  const uncertain = taskRuns.filter(run => run.state === 'uncertain');
+  if (uncertain.length) automation.append(button('查看待核对的执行记录', 'button secondary', () => { dialog.close(); navigate('scheduler'); }));
+  side.append(automation, element('p', 'side-note', '自动实施端：' + automaticActorName('workbuddy') + '。它使用独立 CLI 登录与执行会话，WorkBuddy 桌面仍可通过手动 MCP 协作。停止派发不会强行终止进程；要停止当前工作，请请求任务暂停并检查执行端。'));
   const facts = element('dl');
   for (const [label, value] of [
     ['当前执行者', actorNames[task.owner] || '尚未领取'],
@@ -391,9 +422,9 @@ function openAction(taskId, action) {
     revise: ['修订执行计划', '修改后的计划将交回 WorkBuddy 等待领取，原有记录仍保留。', '新的完整执行计划', '保存修订计划'],
     comment: ['添加任务说明', '补充背景、约束或决策，供下一次交接参考。', '说明内容', '保存说明'],
     retry: ['重新安排任务', '请先检查并停止外部应用对该任务的执行和文件修改，再重新释放任务供应用领取。', '', '确认重新安排'],
-    takeover: ['交给 Codex 接手', '请先确认原执行端已经停止。任务随后进入 Codex 接手队列，仍需 Codex 主动领取。', '', '确认交由 Codex 接手'],
+    takeover: ['交给 Codex 接手', '请先确认原执行端已经停止。任务随后进入 Codex 接手队列；已授权且全局调度开启时，会自动安排执行会话。', '', '确认交由 Codex 接手'],
     request_pause: ['暂停任务', activeStatuses.has(task.status) ? '系统会向当前执行端标记暂停请求。只有执行端确认停止后才释放执行权；默认 90 秒内未确认会转为人工处理并保留占用，不会强行结束应用进程。' : '任务暂停后将暂时不能被领取，现有计划和记录会保留。', '', activeStatuses.has(task.status) ? '发送暂停请求' : '确认暂停'],
-    resume: ['恢复任务', '任务将回到对应的待领取队列，由接入的应用主动继续处理。', '', '确认恢复']
+    resume: ['恢复任务', '任务将回到对应的待领取队列。已授权且全局调度开启时，会自动安排下一轮执行。', '', '确认恢复']
   };
   const config = configs[action];
   if (!config) return;
@@ -421,6 +452,97 @@ async function submitForm(form, operation, done) {
   catch (error) { errorTarget.textContent = error.message; }
   finally { submit.disabled = false; }
 }
+function renderScheduler() {
+  const container = $('#scheduler-content');
+  const scheduler = state.scheduler;
+  if (!scheduler) {
+    container.replaceChildren(element('p', 'section-note', hasState ? '当前服务尚未提供自动协作能力，请更新并重新启动本地服务。' : '正在读取调度状态…'));
+    return;
+  }
+  const overview = element('section', 'panel scheduler-overview');
+  const heading = element('div', 'scheduler-heading');
+  const summary = element('div');
+  summary.append(element('h2', '', '无人值守调度'), element('p', '', scheduler.enabled ? '正在为已授权任务安排下一轮执行。' : '新执行会话暂停派发，手动协作仍可使用。'));
+  const toggle = button(scheduler.enabled ? '停止派发新会话' : '开启自动调度', 'button ' + (scheduler.enabled ? 'secondary' : 'primary'), () => openSchedulerAction({ type: 'global', enabled: !scheduler.enabled }));
+  toggle.dataset.mutation = 'true'; toggle.disabled = !online;
+  heading.append(summary, toggle);
+  const counts = element('div', 'scheduler-counts');
+  const runs = Array.isArray(scheduler.runs) ? scheduler.runs : [];
+  const permitted = state.tasks.filter(task => task.autoEnabled && !['review', 'done'].includes(task.status)).length;
+  counts.append(element('span', 'status-badge ' + (scheduler.enabled ? 'teal' : ''), scheduler.enabled ? '调度已开启' : '调度已关闭'), element('span', '', permitted + ' 项未完成任务已授权'), element('span', '', runs.filter(run => ['launching', 'running'].includes(run.state)).length + ' 个执行会话进行中'), element('span', '', runs.filter(run => run.state === 'uncertain').length + ' 项待人工核对'));
+  overview.append(heading, counts, element('p', 'scheduler-boundary', '开启后，系统为明确授权的任务启动独立 CLI 执行会话，自动衔接规划、实施与阻塞诊断。不会控制已有桌面聊天，也不会自动批准验收。关闭调度只停止新派发；当前工作需通过任务暂停并确认停止。'));
+  const adapters = element('div', 'integration-grid scheduler-adapters');
+  for (const actor of ['codex', 'workbuddy']) {
+    const adapter = scheduler.adapters?.[actor];
+    const card = element('section', 'panel integration-card');
+    const title = element('div', 'card-title');
+    title.append(element('h2', '', automaticActorName(actor)), element('span', 'status-badge ' + (adapter?.available ? 'teal' : 'amber'), adapter?.available ? '启动入口可用' : '启动入口不可用'));
+    card.append(title, element('p', '', actor === 'codex' ? '规划与诊断' : '自动实施端 · 需要独立 CLI 登录，不使用 WorkBuddy 桌面登录状态'), element('p', '', adapter?.reason || (adapter?.available ? '入口已检测到。登录、审批或运行错误以实际执行记录为准。' : '尚未检测到可用入口，请检查本机客户端安装。')));
+    adapters.append(card);
+  }
+  const guide = element('section', 'panel scheduler-guide');
+  guide.append(element('h2', '', '开始一项自动协作'), element('p', '', '先完成自动实施端的独立登录，再创建任务并写清可修改范围与验收标准。在任务详情中点击“允许此任务自动协作”，再开启全局调度。WorkBuddy 桌面的手动 MCP 接入仍然保留。旧任务不会因升级而自动开始；请保持本地服务与电脑运行，审批和异常可能需要你处理。'), button('前往任务工作台 →', 'text-button', () => navigate('tasks')));
+  const history = element('section', 'panel scheduler-history');
+  const historyHeading = element('div', 'panel-heading');
+  historyHeading.append(element('h2', '', '执行记录'), element('span', 'count-label', '显示最近 ' + Math.min(runs.length, 30) + ' 条'));
+  history.append(historyHeading);
+  if (!runs.length) history.append(element('p', 'scheduler-empty', '尚无自动执行记录。授权任务并开启调度后，这里会显示启动、交接与异常情况。'));
+  const labels = { launching: ['正在启动', 'blue'], running: ['执行中', 'blue'], finished: ['会话已结束', 'teal'], uncertain: ['需要核对', 'red'], resolved: ['已确认停止', ''], handed_off: ['已交接，等待退出', 'amber'] };
+  for (const run of [...runs].sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt)).slice(0, 30)) {
+    const row = element('article', 'scheduler-run');
+    const top = element('div', 'scheduler-run-heading');
+    const task = taskById(run.taskId);
+    const title = task ? button(task.title, 'text-button scheduler-task-link', () => openDetail(task.id)) : element('strong', '', '任务 ' + run.taskId);
+    const [label, color] = labels[run.state] || [run.state || '未知状态', ''];
+    top.append(title, element('span', 'status-badge ' + color, label));
+    const details = element('div', 'scheduler-run-meta');
+    const executionLabel = run.adapterLabel || ((run.actor === 'workbuddy' ? '实施端' : '规划与诊断端') + ' · 当前启动器：' + automaticActorName(run.actor));
+    details.append(element('span', '', executionLabel), element('span', '', '开始 ' + time(run.startedAt, true)), element('span', '', run.pid ? '进程 ' + run.pid : '尚无进程编号'), element('span', '', run.handedOff ? '已收到任务交接' : '尚未确认任务交接'));
+    if (run.finishedAt) details.append(element('span', '', '结束 ' + time(run.finishedAt, true)));
+    row.append(top, details);
+    if (run.error) row.append(element('p', 'scheduler-run-error', textValue(run.error)));
+    if (run.state === 'uncertain') {
+      const resolve = button('核对并确认已停止', 'button secondary small', () => openSchedulerAction({ type: 'resolve', runId: run.id, taskId: run.taskId }));
+      resolve.dataset.mutation = 'true'; resolve.disabled = !online;
+      row.append(element('p', 'scheduler-run-note', '系统已阻止重复派发。确认该会话及相关子任务均已停止后，才能释放预约；随后在任务详情决定重新安排。'), resolve);
+    }
+    history.append(row);
+  }
+  container.replaceChildren(overview, adapters, guide, history);
+}
+function openSchedulerAction(action) {
+  if (!online) { toast('请先连接本地服务。', true); return; }
+  const task = action.taskId ? taskById(action.taskId) : null;
+  if (action.type === 'task' && !task) return;
+  pendingSchedulerAction = action;
+  const dialog = prepareForm('scheduler-dialog');
+  let title, description, submit, confirmation = '';
+  if (action.type === 'resolve') {
+    title = '确认执行已停止'; submit = '确认停止并释放预约';
+    description = '请核对应用中的执行会话、进程及相关子任务，确保它们不再写入项目。释放预约不会终止进程，也不会自动重试任务。任务：' + (task?.title || action.taskId);
+    confirmation = '我已确认该执行会话及相关子任务全部停止，不再修改项目文件。';
+  } else if (action.type === 'task') {
+    title = action.enabled ? '允许此任务自动协作' : '关闭此任务自动协作';
+    submit = action.enabled ? '授权此任务' : '关闭自动协作';
+    description = action.enabled
+      ? '任务：' + task.title + '\n项目目录：' + (projectOf(task)?.path || '未知目录') + '\n自动实施端：' + automaticActorName('workbuddy') + '\n全局调度开启后，系统可启动独立 CLI 会话完成规划、实施与诊断。自动实施端需要单独登录，WorkBuddy 桌面仍可手动 MCP 协作。授权将允许当前项目内的文件读写和本任务交接工具；其他权限仍由客户端检查。请确认需求中已写清允许修改的范围与停止条件；成果仍需人工验收。'
+      : '此任务不再派发新执行会话。已经领取的活跃任务会请求暂停，但进程不会被强行结束；请继续检查执行端是否确认停止。';
+    if (action.enabled) confirmation = '我允许应用在上述项目目录和本任务约定范围内自动协作。';
+  } else {
+    title = action.enabled ? '开启自动调度' : '停止派发新会话';
+    submit = action.enabled ? '开启调度' : '停止新派发';
+    description = action.enabled
+      ? '系统只安排单独授权的任务。自动实施端为' + automaticActorName('workbuddy') + '，需要单独登录。每一阶段使用独立 CLI 会话及其审批规则，模型服务可能产生用量；不会使用 WorkBuddy 桌面的原对话或登录状态。遇到结果不确定时会停止并转人工核对，实施结果保留待验收。'
+      : '停止启动新的执行会话，保留已授权任务和全部记录。正在运行的会话会继续，若需要停止当前工作，请在任务详情请求暂停并核对执行端。';
+  }
+  $('#scheduler-action-title').textContent = title;
+  $('#scheduler-action-description').textContent = description;
+  $('#scheduler-action-submit').textContent = submit;
+  $('#scheduler-confirm-label').classList.toggle('hidden', !confirmation);
+  $('#scheduler-confirm-text').textContent = confirmation;
+  $('#scheduler-confirm-check').required = !!confirmation;
+  dialog.showModal();
+}
 async function renderIntegration() {
   const container = $('#integration-content');
   if (!integration) {
@@ -434,7 +556,7 @@ async function renderIntegration() {
   }
   const intro = element('div', 'integration-intro');
   const introText = element('div');
-  introText.append(element('h2', '', '一次配置，让交接回到同一个工作台'), element('p', '', '将本地 MCP 服务添加到应用中，再在应用聊天里明确要求它领取任务。无需另配模型 API。配置只提供接入参考，系统不会改写现有应用配置或聊天记录。'));
+  introText.append(element('h2', '', '一次配置，让交接回到同一个工作台'), element('p', '', '手动协作时，将本地 MCP 服务添加到应用中，再在聊天里要求它领取任务。自动协作使用独立 CLI 执行会话，请在“自动协作”页检查启动入口并授权指定任务。无需另配模型 API，系统不会改写现有聊天记录。'));
   intro.append(element('div', 'intro-mark', '⇄'), introText);
   const grid = element('div', 'integration-grid');
   for (const id of ['codex', 'workbuddy']) {
@@ -518,6 +640,19 @@ $('#action-form').addEventListener('submit', event => {
   submitForm(event.currentTarget, () => api('/api/tasks/' + encodeURIComponent(taskId) + '/action', payload), () => {
     $('#action-dialog').close(); pendingAction = null;
     toast(action === 'request_pause' ? '暂停操作已提交，请查看任务状态' : '操作已保存');
+  });
+});
+$('#scheduler-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const action = pendingSchedulerAction;
+  if (!action) return;
+  if ($('#scheduler-confirm-check').required && !$('#scheduler-confirm-check').checked) return;
+  const path = action.type === 'task' ? '/api/tasks/' + encodeURIComponent(action.taskId) + '/automation'
+    : action.type === 'resolve' ? '/api/scheduler/runs/' + encodeURIComponent(action.runId) + '/resolve' : '/api/scheduler';
+  const payload = action.type === 'resolve' ? { stopped: true } : { enabled: action.enabled };
+  submitForm(event.currentTarget, () => api(path, payload), () => {
+    $('#scheduler-dialog').close(); pendingSchedulerAction = null;
+    toast(action.type === 'resolve' ? '已确认停止；请在任务详情决定是否重新安排' : '自动协作设置已保存');
   });
 });
 window.addEventListener('hashchange', () => navigate(location.hash.slice(1)));

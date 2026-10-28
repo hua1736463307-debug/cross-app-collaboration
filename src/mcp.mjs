@@ -76,7 +76,8 @@ async function callAPI(tool, args, control = null) {
     if (control) control.dispatched = true;
     response = await fetch(apiURL, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-agent-token': token },
+      headers: { 'content-type': 'application/json', 'x-agent-token': token,
+        ...(process.env.HUB_DISPATCH_ID ? { 'x-hub-dispatch-id': process.env.HUB_DISPATCH_ID } : {}) },
       body: JSON.stringify({ tool, arguments: args }),
       redirect: 'error',
       signal: control ? AbortSignal.any([control.abort.signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000)

@@ -1,11 +1,11 @@
 # 本地接口合同（MCP 桥 0.2）
 
 项目名：跨应用协作系统。Node >=24，ESM，无 npm 外部依赖。HTTP 默认仅监听 127.0.0.1:4318；HUB_PORT 可配置本地端口。
-公开能力必须诚实：本地协调与 MCP 主动领取，不能自动唤醒桌面应用。无演示数据默认注入。
+公开能力必须诚实：本地协调与 MCP 主动领取，可为授权任务自动启动独立 CLI 会话，不能遥控已有桌面聊天。无演示数据默认注入。
 
 ## UI API（同源浏览器）
 
-GET /api/state -> {projects:[], tasks:[], events:[], agents:[], meta:{version,localOnly:true,capabilities:{autoWake:false},baseUrl}}
+GET /api/state -> {projects:[], tasks:[], events:[], agents:[], scheduler:{enabled,runs,adapters}, meta:{version,localOnly:true,capabilities:{autoWake:true,existingDesktopChatControl:false},baseUrl}}
 project={id,name,path,createdAt}
 task={id,projectId,title,description,acceptance,status,plan,summary,evidence,blockedCount,maxRetries,revision,owner,heartbeatAt,pauseRequested,createdAt,updatedAt}
 owner=null|'codex'|'workbuddy'；state 不返回 leaseId。

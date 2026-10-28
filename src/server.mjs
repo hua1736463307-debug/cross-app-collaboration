@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { Store, HubError } from './store.mjs';
+import { Scheduler } from './scheduler.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 function json(res, status, payload) {
@@ -44,7 +45,7 @@ function lockDirectory(dataDir) {
   };
 }
 
-export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000 } = {}) {
+export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000, schedulerOptions = {} } = {}) {
   dataDir = path.resolve(dataDir);
   const unlock = lockDirectory(dataDir);
   let store;
@@ -70,7 +71,8 @@ export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000 }
       if (!hosts.includes(req.headers.host)) throw new HubError('拒绝非本机地址请求', 403);
       const origin = req.headers.origin;
       if (origin && !hosts.some(host => origin === 'http://' + host)) throw new HubError('拒绝跨站请求', 403);
-      if (req.headers['sec-fetch-site'] === 'cross-site') throw new HubError('拒绝跨站请求', 403);
+      const pageNavigation = req.method === 'GET' && req.url === '/' && req.headers['sec-fetch-mode'] === 'navigate' && req.headers['sec-fetch-dest'] === 'document';
+      if (req.headers['sec-fetch-site'] === 'cross-site' && !pageNavigation) throw new HubError('拒绝跨站请求', 403);
       const url = new URL(req.url, 'http://127.0.0.1:' + port);
       const pathname = url.pathname;
       if (pathname === '/api/agent' && req.method === 'POST') {
@@ -81,13 +83,13 @@ export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000 }
         }) : null;
         if (!actor) throw new HubError('客户端身份校验失败', 401);
         const input = await body(req);
-        return json(res, 200, store.agent(actor, input.tool, input.arguments || {}));
+        return json(res, 200, store.agent(actor, input.tool, input.arguments || {}, req.headers['x-hub-dispatch-id']));
       }
       if (pathname.startsWith('/api/') && req.method === 'POST' && req.headers['x-hub-ui'] !== '1')
         throw new HubError('缺少本地工作台请求标记', 403);
       if (pathname === '/api/state' && req.method === 'GET') {
-        return json(res, 200, { ...store.state(), meta: {
-          version: '0.1.0', localOnly: true, capabilities: { autoWake: false },
+        return json(res, 200, { ...store.state(), scheduler: scheduler.state(), meta: {
+          version: '0.3.0', localOnly: true, capabilities: { autoWake: true, existingDesktopChatControl: false },
           baseUrl: 'http://127.0.0.1:' + port
         } });
       }
@@ -100,7 +102,7 @@ export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000 }
           configs: { codex: config('codex'), workbuddy: config('workbuddy') }, projectRoot: root,
           instructions: '先启动本地服务，再在各应用的 MCP 设置中新增对应 stdio 服务。不要覆盖现有配置。接入后，在应用内明确要求调用 list_tasks、claim_task 并按任务单执行。',
           limitations: [
-            '本版本不自动唤醒或遥控桌面聊天；需要你先在各应用中发起协作。',
+            '可为授权任务自动启动独立 CLI 执行会话，不遥控已有桌面聊天。请先配置并启用自动协作。',
             '已连接仅表示最近 90 秒收到 MCP 调用或桥心跳，不表示模型正在工作。',
             '暂停为协作请求；只有执行端确认停止后才释放占用，不能强制终止外部进程。',
             '请勿同时从系统外让两边修改同一项目；本系统无法阻止绕过任务领取的写入。',
@@ -110,6 +112,11 @@ export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000 }
       }
       if (pathname === '/api/projects' && req.method === 'POST') return json(res, 201, store.createProject(await body(req)));
       if (pathname === '/api/tasks' && req.method === 'POST') return json(res, 201, store.createTask(await body(req)));
+      if (pathname === '/api/scheduler' && req.method === 'POST') return json(res, 200, store.setSchedulerEnabled((await body(req)).enabled));
+      const automation = pathname.match(/^\/api\/tasks\/([a-f0-9-]+)\/automation$/);
+      if (automation && req.method === 'POST') return json(res, 200, store.setTaskAutomation(automation[1], (await body(req)).enabled));
+      const resolution = pathname.match(/^\/api\/scheduler\/runs\/([a-f0-9-]+)\/resolve$/);
+      if (resolution && req.method === 'POST') return json(res, 200, scheduler.resolve(resolution[1], await body(req)));
       const action = pathname.match(/^\/api\/tasks\/([a-f0-9-]+)\/action$/);
       if (action && req.method === 'POST') return json(res, 200, store.action(action[1], await body(req)));
       const packet = pathname.match(/^\/api\/tasks\/([a-f0-9-]+)\/packet$/);
@@ -130,15 +137,16 @@ export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000 }
       if (!error.status) console.error('[hub]', error.message);
     }
   });
+  const scheduler = new Scheduler(store, { root, dataDir, getURL: () => server.listening ? 'http://127.0.0.1:' + server.address().port : null, ...schedulerOptions });
   const timer = setInterval(() => { try { store.expire(); } catch (e) { console.error('[hub]', e.message); } }, Math.min(15000, leaseMs));
   timer.unref();
   const dispose = () => {
     if (disposed) return;
-    disposed = true; clearInterval(timer); store.close(); unlock();
+    disposed = true; clearInterval(timer); scheduler.close(); store.close(); unlock();
   };
   server.once('close', dispose);
   server.once('error', dispose);
-  return { server, store, dataDir, dispose };
+  return { server, store, scheduler, dataDir, dispose };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

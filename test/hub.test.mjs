@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
+import { get as httpGet } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { Store } from '../src/store.mjs';
 import { createHub } from '../src/server.mjs';
@@ -168,6 +169,11 @@ test('HTTP 拒绝跨站修改与假客户端，不泄露租约和令牌', async 
   const { dir, hub, url, post } = await live(t);
   assert.equal((await post('/api/projects', { name: '跨站', path: dir }, { origin: 'https://example.com' })).status, 403);
   assert.equal((await post('/api/projects', { name: '无标记', path: dir }, { 'x-hub-ui': '' })).status, 403);
+  const navigationStatus = route => new Promise((resolve, reject) => httpGet(url + route, { headers: {
+    'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document'
+  } }, response => { response.resume(); resolve(response.statusCode); }).on('error', reject));
+  assert.equal(await navigationStatus('/'), 200);
+  assert.equal(await navigationStatus('/api/state'), 403);
   assert.equal((await post('/api/agent', { tool: 'heartbeat' }, { 'x-agent-token': 'bad' })).status, 401);
   const p = await post('/api/projects', { name: 'HTTP项目', path: dir });
   assert.equal(p.status, 201);

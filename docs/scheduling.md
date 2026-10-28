@@ -1,0 +1,69 @@
+# 自动协作与无人值守调度
+
+## 运行方式
+
+保持本地工作台运行，系统按队列自动启动独立 CLI 执行会话：Codex 制定计划 → 独立 CodeBuddy Code 实施 → 如有阻塞则 Codex 诊断 → 达到阻塞上限转人工；成果停在 review，人工验收后才进入 done。
+
+这不会点击桌面应用，也不会往已有聊天里发送消息。Codex 使用现有登录；CodeBuddy Code 通过自己的正规流程单独登录，不复制 WorkBuddy 凭据，不新增模型 API Key。电脑休眠、退出登录或本地服务停止时不能继续调度。
+
+## 配置本机入口
+
+在本项目 data 目录创建 launchers.json，填写实际存在的绝对路径：
+
+```json
+{
+  "executor": "codebuddy",
+  "codex": "C:/your-node/node_modules/@openai/codex/bin/codex.js",
+  "workbuddy": "C:/your-project/data/clients/codebuddy/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy"
+}
+```
+
+示例路径需替换。支持通过环境变量 HUB_CODEX_CLI / HUB_WORKBUDDY_CLI 指定；Codex 的 npm 安装入口还会从 Node 所在目录和 PATH 目录探测。修改后重启本地服务，工作台会展示入口可用性。发现入口只代表文件存在，不保证已登录或当前模型可用。
+
+`executor: codebuddy` 明确选择官方独立 CodeBuddy Code。配置键 `workbuddy` 保留为实施角色的兼容字段，界面会显示实际执行端。通过 [官方快速入门](https://www.codebuddy.cn/docs/cli/quickstart) 安装并登录，项目中附有登录启动脚本；不要把 WorkBuddy 桌面登录等同于独立 CLI 已登录。
+
+配置好后双击项目根目录的 **登录自动实施端.cmd**，在交互界面选择 Chinese Site 并完成浏览器登录。登录后的首次任务仍建议使用隔离测试目录。该脚本不读取或复制凭据，只启动所配置的官方 CLI。
+
+省略 executor 时保留 WorkBuddy 国内版随包 CLI 适配能力，但实测其鉴权依赖宿主，独立启动会返回需要登录，不能保证无人值守可用。原有桌面 MCP 手动交接不受影响；不提取宿主令牌来绕过该限制。
+
+Codex 使用 `--approve-for-me` 并设置 `sandbox_mode="workspace-write"`，由自动审查处理权限请求并保留沙箱；当前 CLI 不允许同时传 `--approve-for-me` 和 `--sandbox` 两个选项。实施端保留默认权限模式，不使用跳过审批选项。任务授权不能保证每个工具自动通过审批：被拒时应停止并转人工。不要为消除失败而关闭安全检查。
+
+任务授权后，为该轮实施会话预先允许本系统八个 MCP 工具，以及工作目录内的 Read / Edit / Write。工具直接加载，避免延迟加载包装器在非交互模式要求额外批准。不会额外放行 shell、联网、子代理或项目外文件；已有用户权限规则仍由客户端执行。需要命令执行等额外权限而被拒时，会停止并交回诊断或人工处理。
+
+文件权限规则使用项目的绝对目录，支持中文及空格。路径含逗号、括号、glob 元字符或控制字符时，系统会拒绝自动启动实施端，避免把目录名误解析成更大的授权范围；不会退回无限制文件权限。当前 CodeBuddy 版本在 Windows 上的相对目录规则可能无法匹配工具使用的绝对路径。
+
+## 开启与停止
+
+1. 新建任务，明确项目目录、修改范围和验收标准。
+2. 在任务详情勾选范围确认，开启该任务的自动协作。
+3. 在“自动协作”页开启总开关。旧任务不会因升级被自动授权。
+4. 查看执行记录、任务计划、结果与证据；review 仍需人工验收。
+
+关闭总开关仅停止新派发，不强杀已有进程。关闭某个活跃任务的自动协作会请求暂停；也可以使用原有“请求执行端暂停”。执行端需停止写入与子任务后确认暂停。
+
+本版全局串行派发，一次只运行一个自动执行会话。手工领取的项目占用与自动启动预约互斥，重叠目录也受保护。系统无法拦截客户端绕开平台的文件修改。
+
+## 失败与恢复
+
+- 启动前先持久化预约；启动后默认 3 分钟未领取，或单轮超过 20 分钟，转为结果不确定并保留预约。
+- 只有本次启动绑定的 MCP 完成交接，且执行进程以 0 退出，才允许派下一轮。进程退出或输出“完成”均不能单独证明成功。
+- 启动失败、未交接退出、非零退出、超时、失联和服务重启会停止自动推进。不会自动重放旧执行。
+- 不确定执行会暂停新的自动派发。先核对原 CLI 会话及其子任务均已停止，在执行记录中勾选确认并释放预约，然后在任务详情重新安排、重新授权。
+- 系统会拒绝为仍在运行的原进程释放预约。不会替用户强杀进程或自动恢复数据库。
+
+每轮 CLI 输出仅保存于 data/runs/<runId>/output.log，单轮最多 1 MiB；原始输出可能含项目内容，不经 HTTP 返回，也不上传 Git。MCP 配置同样只写入该本地目录，不改用户全局配置。
+
+## 协议增量
+
+- POST /api/scheduler {enabled:boolean}：总开关。
+- POST /api/tasks/:id/automation {enabled:boolean}：任务授权。
+- POST /api/scheduler/runs/:id/resolve {stopped:true}：人工确认停止，释放不确定预约。
+- 上述接口沿用同源与 x-hub-ui 检查，MCP 工具没有这些管理能力。
+- 调度桥通过 HUB_DISPATCH_ID 发送 x-hub-dispatch-id 请求头；服务绑定应用、任务、计划版本及一次领取，不代填 leaseId。
+- 新增 dispatches/settings 表；原有项目、任务和事件保留，历史任务 autoEnabled 默认 false。
+
+## 验证层级
+
+`npm test` 包括隔离数据库、真实测试子进程和 MCP/HTTP 调度回归。测试程序不能代替真实模型任务验收；在每台电脑上用独立测试目录验证一次最小交付，再用于实际项目。涉及发布、外部通信、付费和权限变更的任务仍需要对应授权。
+
+参考：[Codex 非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode)、[CodeBuddy CLI 无头模式](https://www.codebuddy.cn/docs/cli/headless)。
