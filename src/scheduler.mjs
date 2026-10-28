@@ -44,11 +44,14 @@ export class Scheduler {
         if (line.length > 65536) continue;
         try {
           const event = JSON.parse(line);
+          if (event.type === 'system' && event.subtype === 'init' && typeof event.model === 'string' && event.model.length <= 100) {
+            this.store.tx(() => { const record = this.store.getDispatch(run.id); record.reportedModel = event.model; if (typeof event.reasoning_effort === 'string' && event.reasoning_effort.length <= 32) record.reportedEffort = event.reasoning_effort; this.store.saveDispatch(record); });
+          }
           if ((event.type === 'result' && event.is_error) || event.type === 'turn.failed') {
             const message = JSON.stringify(event.errors || event.error || '');
             clientFailure = /authentication|login|sign in|unauthorized/i.test(message)
               ? '执行客户端尚未登录或登录失效，请通过该 CLI 的正规登录入口登录后重新安排。'
-              : '执行客户端报告失败，请检查本机输出、模型可用性及权限；本轮不会自动重试。';
+              : '执行客户端报告失败：所选模型或推理强度可能不可用，也可能是权限或其他客户端错误；请检查本机日志。本轮不会自动更换或重试。';
           }
         } catch { /* Non-JSON progress lines are local diagnostics only. */ }
       }
@@ -70,8 +73,11 @@ export class Scheduler {
     child.once('close', code => {
       this.children.delete(run.id);
       if (!this.closed) {
+        const record = this.store.getDispatch(run.id);
+        if (record.requestedModel?.model && record.reportedModel && record.requestedModel.model !== record.reportedModel) clientFailure = '客户端报告的模型与请求的模型不一致；已停止自动流转，请检查模型或客户端回退配置。';
+        if (record.requestedModel?.effort && record.reportedEffort && record.requestedModel.effort !== record.reportedEffort) clientFailure = '客户端报告的推理强度与请求的强度不一致；已停止自动流转，请检查客户端配置。';
         if (clientFailure) this.store.failDispatch(run.id, clientFailure);
-        else this.store.finishDispatch(run.id, { code, error: code === 0 ? null : '执行进程异常退出；详情保留在本机 data/runs 日志。' });
+        else this.store.finishDispatch(run.id, { code, error: code === 0 ? null : '执行进程异常退出；请检查所选模型、推理强度和本机日志。系统不会自动更换模型或降低强度。' });
       }
     });
   }

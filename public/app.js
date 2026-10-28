@@ -377,6 +377,8 @@ function renderDetail(id, preserve = false) {
   const canEnable = !task.owner && ['planning_queue', 'ready', 'blocked', 'codex_fix_queue'].includes(task.status)
     && !taskRuns.some(run => ['launching', 'running', 'uncertain'].includes(run.state));
   automation.append(element('h3', '', '自动协作'), element('span', 'status-badge ' + (task.autoEnabled ? 'teal' : ''), task.autoEnabled ? '此任务已授权' : '此任务未授权'));
+  const modelButton = button('设置此任务模型', 'button secondary', () => openModelSettings(task));
+  modelButton.disabled = !online; automation.append(modelButton);
   if (task.autoEnabled || !['done', 'review'].includes(task.status)) {
     const toggle = button(task.autoEnabled ? '关闭此任务自动协作' : '允许此任务自动协作', 'button secondary', () => openSchedulerAction({ type: 'task', taskId: id, enabled: !task.autoEnabled }));
     toggle.dataset.mutation = 'true';
@@ -452,6 +454,42 @@ async function submitForm(form, operation, done) {
   catch (error) { errorTarget.textContent = error.message; }
   finally { submit.disabled = false; }
 }
+function openModelSettings(task = null) {
+  if (!online) { toast('请先连接本地服务。', true); return; }
+  const dialog = element('dialog', 'form-dialog');
+  const form = element('form');
+  const heading = element('div', 'dialog-heading');
+  heading.append(element('h2', '', task ? '任务模型设置' : '默认模型设置'), button('×', 'icon-button', () => dialog.close()));
+  form.append(heading, element('p', 'dialog-description', task ? '留空表示跟随自动协作默认设置。修改只影响后续派发。' : '留空表示跟随对应客户端默认设置。修改只影响后续派发，不改变正在运行的会话。'));
+  const values = task ? task.modelSettings || {} : state.scheduler?.modelSettings || {};
+  const controls = {};
+  for (const [key, label] of [['planning', 'Codex 规划'], ['implementation', 'CodeBuddy 实施'], ['diagnosis', 'Codex 诊断与接手']]) {
+    const section = element('section'); section.append(element('h3', '', label));
+    const modelLabel = element('label', '', '模型 ID');
+    const model = element('input'); model.type = 'text'; model.maxLength = 100; model.placeholder = task ? '留空：跟随默认设置' : '留空：跟随客户端默认'; model.value = values[key]?.model || '';
+    modelLabel.append(model);
+    const effortLabel = element('label', '', '推理强度');
+    const effort = element('select');
+    for (const [value, name] of [['', task ? '跟随默认设置' : '跟随客户端默认'], ...((key === 'implementation' ? ['minimal','low','medium','high','xhigh','max'] : ['none','minimal','low','medium','high','xhigh','max','ultra']).map(x => [x, x]))]) {
+      const option = element('option', '', name); option.value = value; effort.append(option);
+    }
+    effort.value = values[key]?.effort || '';
+    effortLabel.append(effort); section.append(modelLabel, effortLabel); form.append(section); controls[key] = { model, effort };
+  }
+  form.append(element('p', 'field-note', '模型需填写客户端支持的准确 ID；账号权限和强度兼容性以实际执行结果为准，不会自动降级。'));
+  const error = element('p', 'form-error'); error.setAttribute('role', 'alert');
+  const footer = element('div', 'dialog-footer');
+  const save = element('button', 'button primary', '保存设置'); save.type = 'submit';
+  footer.append(button('取消', 'button secondary', () => dialog.close()), save); form.append(error, footer);
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); save.disabled = true; error.textContent = '';
+    const payload = Object.fromEntries(Object.entries(controls).map(([key, value]) => [key, { model: value.model.value.trim(), effort: value.effort.value }]));
+    try { await api(task ? '/api/tasks/' + encodeURIComponent(task.id) + '/model-settings' : '/api/scheduler/model-settings', payload); dialog.close(); await refresh(true); toast('模型设置已保存，新派发生效'); }
+    catch (e) { error.textContent = e.message; } finally { save.disabled = false; }
+  });
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+  dialog.append(form); document.body.append(dialog); dialog.showModal();
+}
 function renderScheduler() {
   const container = $('#scheduler-content');
   const scheduler = state.scheduler;
@@ -471,6 +509,8 @@ function renderScheduler() {
   const permitted = state.tasks.filter(task => task.autoEnabled && !['review', 'done'].includes(task.status)).length;
   counts.append(element('span', 'status-badge ' + (scheduler.enabled ? 'teal' : ''), scheduler.enabled ? '调度已开启' : '调度已关闭'), element('span', '', permitted + ' 项未完成任务已授权'), element('span', '', runs.filter(run => ['launching', 'running'].includes(run.state)).length + ' 个执行会话进行中'), element('span', '', runs.filter(run => run.state === 'uncertain').length + ' 项待人工核对'));
   overview.append(heading, counts, element('p', 'scheduler-boundary', '开启后，系统为明确授权的任务启动独立 CLI 执行会话，自动衔接规划、实施与阻塞诊断。不会控制已有桌面聊天，也不会自动批准验收。关闭调度只停止新派发；当前工作需通过任务暂停并确认停止。'));
+  const modelSettingsButton = button('设置默认模型与推理强度', 'button secondary', () => openModelSettings());
+  modelSettingsButton.disabled = !online; overview.append(modelSettingsButton);
   const adapters = element('div', 'integration-grid scheduler-adapters');
   for (const actor of ['codex', 'workbuddy']) {
     const adapter = scheduler.adapters?.[actor];
@@ -498,6 +538,8 @@ function renderScheduler() {
     const details = element('div', 'scheduler-run-meta');
     const executionLabel = run.adapterLabel || ((run.actor === 'workbuddy' ? '实施端' : '规划与诊断端') + ' · 当前启动器：' + automaticActorName(run.actor));
     details.append(element('span', '', executionLabel), element('span', '', '开始 ' + time(run.startedAt, true)), element('span', '', run.pid ? '进程 ' + run.pid : '尚无进程编号'), element('span', '', run.handedOff ? '已收到任务交接' : '尚未确认任务交接'));
+    details.append(element('span', '', '请求模型：' + (run.requestedModel?.model || '客户端默认') + ' / 强度：' + (run.requestedModel?.effort || '客户端默认')),
+      element('span', '', '客户端报告模型：' + (run.reportedModel || '未确认') + ' / 强度：' + (run.reportedEffort || '未确认')));
     if (run.finishedAt) details.append(element('span', '', '结束 ' + time(run.finishedAt, true)));
     row.append(top, details);
     if (run.error) row.append(element('p', 'scheduler-run-error', textValue(run.error)));

@@ -9,6 +9,21 @@ export class HubError extends Error {
 const ACTIVE = new Set(['planning', 'implementing', 'diagnosing', 'fixing']);
 const OPEN_DISPATCH = new Set(['launching', 'running', 'uncertain']);
 const QUEUES = { codex: ['planning_queue', 'blocked', 'codex_fix_queue'], workbuddy: ['ready'] };
+const MODEL_STAGES = ['planning', 'implementation', 'diagnosis'];
+const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'none', 'ultra']);
+function validateModelSettings(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !MODEL_STAGES.includes(k))) throw new HubError('模型配置格式无效');
+  const result = {};
+  for (const stage of MODEL_STAGES) {
+    const item = input[stage] ?? {};
+    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).some(k => !['model', 'effort'].includes(k))) throw new HubError('模型配置格式无效');
+    const model = item.model ?? '', effort = item.effort ?? '';
+    if (typeof model !== 'string' || model.length > 100 || (model && !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/.test(model))) throw new HubError('模型 ID 格式无效');
+    if (typeof effort !== 'string' || (effort && (!EFFORTS.has(effort) || (stage === 'implementation' && ['none', 'ultra'].includes(effort))))) throw new HubError('推理强度无效');
+    result[stage] = { model, effort };
+  }
+  return result;
+}
 const stamp = () => new Date().toISOString();
 const text = (value, label, max = 100000) => {
   if (typeof value !== 'string' || !value.trim()) throw new HubError(label + '不能为空');
@@ -66,7 +81,16 @@ export class Store {
     return JSON.parse(row.body);
   }
   schedulerState() {
-    return { enabled: this.db.prepare('SELECT value FROM settings WHERE id=?').get('schedulerEnabled')?.value === 'true', runs: this.all('dispatches') };
+    return { enabled: this.db.prepare('SELECT value FROM settings WHERE id=?').get('schedulerEnabled')?.value === 'true', modelSettings: this.modelSettings(), runs: this.all('dispatches') };
+  }
+  modelSettings() { const row = this.db.prepare('SELECT value FROM settings WHERE id=?').get('modelSettings'); return row ? validateModelSettings(JSON.parse(row.value)) : validateModelSettings({}); }
+  setModelSettings(input) {
+    const settings = validateModelSettings(input);
+    return this.tx(() => { this.db.prepare('INSERT INTO settings(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run('modelSettings', JSON.stringify(settings)); this.event(null, 'model_settings', 'human', '更新了自动协作默认模型设置，新派发生效。'); return settings; });
+  }
+  setTaskModelSettings(id, input) {
+    const settings = validateModelSettings(input);
+    return this.tx(() => { const task = this.getTask(id); task.modelSettings = settings; this.save(task); this.event(id, 'model_settings', 'human', '更新了任务模型设置，新派发生效。'); return cleanTask(task); });
   }
   setSchedulerEnabled(enabled) {
     if (typeof enabled !== 'boolean') throw new HubError('调度开关必须为布尔值');
@@ -115,7 +139,10 @@ export class Store {
       const task = tasks.find(t => t.autoEnabled === true && !t.owner && !t.pauseRequested && QUEUES[actor].includes(t.status) &&
         !tasks.some(other => other.owner && this.overlap(t.projectId, other.projectId)));
       if (!task) return null;
-      const run = { id: randomUUID(), taskId: task.id, actor, sourceStatus: task.status, revision: task.revision,
+      const stage = actor === 'workbuddy' ? 'implementation' : task.status === 'planning_queue' ? 'planning' : 'diagnosis';
+      const defaults = this.modelSettings()[stage], override = validateModelSettings(task.modelSettings || {})[stage];
+      const requestedModel = { model: override.model || defaults.model || null, effort: override.effort || defaults.effort || null };
+      const run = { id: randomUUID(), taskId: task.id, actor, sourceStatus: task.status, revision: task.revision, stage, requestedModel, reportedModel: null, reportedEffort: null,
         state: 'launching', startedAt: stamp(), claimedAt: null, pid: null, handedOff: false, finishedAt: null, error: null };
       this.db.prepare('INSERT INTO dispatches(id,body) VALUES(?,?)').run(run.id, JSON.stringify(run));
       this.event(task.id, 'dispatch_reserved', 'system', '已预约 ' + actor + ' 自动执行；等待客户端领取。');

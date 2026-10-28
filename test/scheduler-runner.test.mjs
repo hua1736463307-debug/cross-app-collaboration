@@ -96,6 +96,27 @@ test('structured authentication failure is actionable even when client exits zer
   f.hub.scheduler.tick(); assert.equal(f.launches.length, 1);
 });
 
+test('unavailable model reports error and never retries or falls back', async t => {
+  const f = await setup(t, 'model-error'), task = f.makeTask('Unavailable model');
+  await f.ui('/api/scheduler/model-settings', { planning: { model: 'unavailable-model', effort: 'high' } });
+  f.hub.store.setSchedulerEnabled(true); f.hub.store.setTaskAutomation(task.id, true); f.hub.scheduler.tick();
+  await until(() => f.hub.scheduler.state().runs[0]?.state === 'uncertain', 'model failure');
+  const run = f.hub.scheduler.state().runs[0];
+  assert.match(run.error, /模型.*不可用/); assert.equal(run.requestedModel.model, 'unavailable-model');
+  assert.equal(run.reportedModel, null); assert.equal(f.hub.store.getTask(task.id).status, 'needs_human');
+  f.hub.scheduler.tick(); assert.equal(f.launches.length, 1);
+});
+
+test('reported model mismatch is recorded and prevents dispatch of the next phase', async t => {
+  const f = await setup(t, 'model-mismatch'), task = f.makeTask('Wrong reported model');
+  await f.ui('/api/tasks/' + task.id + '/model-settings', { planning: { model: 'requested-model' } });
+  f.hub.store.setSchedulerEnabled(true); f.hub.store.setTaskAutomation(task.id, true); f.hub.scheduler.tick();
+  await until(() => f.hub.scheduler.state().runs[0]?.state === 'uncertain', 'model mismatch');
+  const run = f.hub.scheduler.state().runs[0];
+  assert.equal(run.reportedModel, 'different-model'); assert.equal(run.requestedModel.model, 'requested-model');
+  assert.match(run.error, /不一致/); f.hub.scheduler.tick(); assert.equal(f.launches.length, 1);
+});
+
 test('child logs stop at one MiB and are never served as state or assets', async t => {
   const f = await setup(t, 'flood'), task = f.makeTask('Bounded log fixture');
   f.hub.store.setSchedulerEnabled(true); f.hub.store.setTaskAutomation(task.id, true); f.hub.scheduler.tick();

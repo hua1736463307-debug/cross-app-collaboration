@@ -113,6 +113,9 @@ export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000, 
       if (pathname === '/api/projects' && req.method === 'POST') return json(res, 201, store.createProject(await body(req)));
       if (pathname === '/api/tasks' && req.method === 'POST') return json(res, 201, store.createTask(await body(req)));
       if (pathname === '/api/scheduler' && req.method === 'POST') return json(res, 200, store.setSchedulerEnabled((await body(req)).enabled));
+      if (pathname === '/api/scheduler/model-settings' && req.method === 'POST') return json(res, 200, store.setModelSettings(await body(req)));
+      const taskModelSettings = pathname.match(/^\/api\/tasks\/([a-f0-9-]+)\/model-settings$/);
+      if (taskModelSettings && req.method === 'POST') return json(res, 200, store.setTaskModelSettings(taskModelSettings[1], await body(req)));
       const automation = pathname.match(/^\/api\/tasks\/([a-f0-9-]+)\/automation$/);
       if (automation && req.method === 'POST') return json(res, 200, store.setTaskAutomation(automation[1], (await body(req)).enabled));
       const resolution = pathname.match(/^\/api\/scheduler\/runs\/([a-f0-9-]+)\/resolve$/);

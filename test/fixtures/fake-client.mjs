@@ -29,6 +29,11 @@ if (mode === 'auth-error') {
   console.log(JSON.stringify({type:'result', is_error:true, errors:['Authentication required. Please use /login']}));
   process.exit(0);
 }
+if (mode === 'model-error') {
+  console.log(JSON.stringify({ type: 'result', is_error: true, errors: ['Requested model is unavailable'] }));
+  process.exit(0);
+}
+if (mode === 'model-mismatch') console.log(JSON.stringify({ type: 'system', subtype: 'init', model: 'different-model' }));
 if (mode === 'flood') {
   for (let i = 0; i < 8; i++) if (!process.stdout.write('LOCAL_PRIVATE_LOG_MARKER'.repeat(8000))) await once(process.stdout, 'drain');
   process.exit(0);

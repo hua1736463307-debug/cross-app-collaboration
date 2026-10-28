@@ -52,6 +52,23 @@ test('automation requires both persistent global and per-task opt-in', t => {
   assert.throws(() => s.setTaskAutomation(task.id, 'true'));
 });
 
+test('model defaults and task overrides are resolved atomically at dispatch and never mutate existing runs', t => {
+  const { s, task } = fixture(t);
+  s.setModelSettings({ planning: { model: 'codex-default', effort: 'high' }, implementation: { model: 'buddy-default', effort: 'medium' }, diagnosis: { model: 'codex-diagnosis', effort: 'xhigh' } });
+  s.setTaskModelSettings(task.id, { planning: { model: 'custom-model' } });
+  enable(s, task);
+  const run = s.reserveDispatch('codex');
+  assert.equal(run.stage, 'planning');
+  assert.deepEqual(run.requestedModel, { model: 'custom-model', effort: 'high' });
+  s.setModelSettings({ planning: { model: 'new-default', effort: 'low' } });
+  s.setTaskModelSettings(task.id, { planning: { model: 'later-model', effort: 'medium' } });
+  assert.deepEqual(s.getDispatch(run.id).requestedModel, { model: 'custom-model', effort: 'high' });
+  assert.throws(() => s.setModelSettings({ planning: { model: '--bad' } }), /模型 ID/);
+  assert.throws(() => s.setModelSettings({ implementation: { effort: 'ultra' } }), /强度/);
+  assert.throws(() => s.setTaskModelSettings(task.id, { planning: { effort: 'invalid' } }), /强度/);
+  assert.equal(s.getTask(task.id).modelSettings.planning.model, 'later-model');
+});
+
 test('reservation is globally serial and fences ordinary and overlapping claims', t => {
   const { s, task, make, dir } = fixture(t);
   const sibling = make();

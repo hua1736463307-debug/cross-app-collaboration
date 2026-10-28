@@ -56,6 +56,8 @@ export function buildLaunch({ actor, paths, root, dataDir, url, run, project }) 
   let command = process.execPath, args, env = { ...process.env };
   if (actor === 'codex') {
     args = ['exec', '--approve-for-me', '-c', 'sandbox_mode="workspace-write"', '--skip-git-repo-check', '--ephemeral', '--json', '-C', project.path];
+    if (run.requestedModel?.model) args.push('--model', run.requestedModel.model);
+    if (run.requestedModel?.effort) args.push('-c', 'model_reasoning_effort=' + JSON.stringify(run.requestedModel.effort));
     const section = 'mcp_servers.cross-app-codex';
     for (const [key, value] of Object.entries({ command: bridge.command, args: bridge.args, ...Object.fromEntries(Object.entries(bridge.env).map(([k,v]) => ['env.' + k, v])) })) {
       args.push('-c', section + '.' + key + '=' + JSON.stringify(value));
@@ -70,6 +72,8 @@ export function buildLaunch({ actor, paths, root, dataDir, url, run, project }) 
     fs.writeFileSync(mcpFile, JSON.stringify({ mcpServers: { 'cross-app-workbuddy': bridge } }, null, 2));
     args = [paths.workbuddy, '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'default',
       '--agent', 'cli', '--max-turns', '40', '--strict-mcp-config', '--mcp-config', mcpFile, '--no-session-persistence'];
+    if (run.requestedModel?.model) args.push('--model', run.requestedModel.model);
+    if (run.requestedModel?.effort) args.push('--effort', run.requestedModel.effort);
     const taskTools = ['list_tasks', 'get_task', 'claim_task', 'heartbeat', 'submit_plan', 'report_blocked', 'submit_result', 'acknowledge_pause']
       .map(name => 'mcp__cross-app-workbuddy__' + name);
     // One rule per argv preserves spaces inside a project directory name.

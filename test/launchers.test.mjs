@@ -127,3 +127,15 @@ test('ambiguous file scopes fail closed instead of becoming wider permission rul
   }
   assert.throws(() => projectFileRules('relative-project'), /权限规则/);
 });
+
+test('explicit dispatch model and effort are passed to each CLI without fallback flags', t => {
+  const dir = temp(t), project = { path: dir }, run = { id: 'model-fixture', taskId: 'fixture-task', requestedModel: { model: 'test-model', effort: 'high' } };
+  const common = { root, dataDir: dir, url: 'http://127.0.0.1:4319', run, project };
+  const codex = buildLaunch({ ...common, actor: 'codex', paths: { codex: path.join(dir, 'codex.js') } });
+  assert.equal(codex.args[codex.args.indexOf('--model') + 1], 'test-model');
+  assert.ok(codex.args.includes('model_reasoning_effort="high"'));
+  const buddy = buildLaunch({ ...common, actor: 'workbuddy', paths: { executor: 'codebuddy', workbuddy: path.join(dir, 'codebuddy.js') } });
+  assert.equal(buddy.args[buddy.args.indexOf('--model') + 1], 'test-model');
+  assert.equal(buddy.args[buddy.args.indexOf('--effort') + 1], 'high');
+  assert.equal(buddy.args.includes('--fallback-model'), false);
+});
