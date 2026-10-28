@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#152a32">
+  <title>跨应用协作系统 · 本地工作台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <aside class="sidebar">
+    <a class="brand" href="#tasks" aria-label="跨应用协作系统首页">
+      <span class="brand-symbol" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span><strong>跨应用协作系统</strong><small>LOCAL COLLABORATION</small></span>
+    </a>
+    <div class="workspace-label">个人工作空间</div>
+    <nav aria-label="主导航">
+      <button class="nav-item active" data-view="tasks"><span aria-hidden="true">▦</span>任务工作台</button>
+      <button class="nav-item" data-view="projects"><span aria-hidden="true">▤</span>项目目录</button>
+      <button class="nav-item" data-view="integration"><span aria-hidden="true">⇄</span>应用接入</button>
+    </nav>
+    <div class="sidebar-note"><span class="tiny-orbit" aria-hidden="true"></span><strong>协作在本地发生</strong><p>计划、进度与交接记录<br>保存在这台电脑上。</p></div>
+    <div class="sidebar-footer"><span class="status-dot green"></span>本地部署<span id="version">v0.1</span></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><div class="breadcrumb">工作空间<span>/</span><strong id="breadcrumb">任务工作台</strong></div><div class="topbar-right"><span class="local-pill">仅本机访问</span><span id="service-state" class="service-state" role="status"><i class="status-dot"></i>正在连接</span></div></header>
+    <main id="main" tabindex="-1">
+      <div id="offline-banner" class="alert error hidden" role="alert"></div>
+      <section class="page-heading"><div><div class="eyebrow">YOUR LOCAL AGENT WORKSPACE</div><h1 id="page-title">让计划与实施，有序衔接。</h1><p id="page-subtitle">Codex 负责规划与诊断，WorkBuddy 负责实施，你掌握关键决定。</p></div><button id="primary-action" class="button primary"><span aria-hidden="true">＋</span> 创建任务</button></section>
+      <section id="tasks-view">
+        <div id="metrics" class="metrics" aria-label="任务概览"></div>
+        <div class="workflow" aria-label="工作流程"><span class="flow-label">协作流程</span><span><i>01</i>Codex 出计划</span><b>→</b><span><i>02</i>WorkBuddy 实施</span><b>→</b><span><i>03</i>阻塞回传与修订</span><b>→</b><span><i>04</i>人工验收</span></div>
+        <div class="workspace-grid">
+          <section class="panel task-panel" aria-label="任务列表">
+            <div class="panel-heading"><div><h2>项目任务</h2><span id="task-count" class="count-label">0 项任务</span></div><button id="refresh-button" class="text-button" title="立即刷新">↻ 刷新</button></div>
+            <div class="task-filters"><div id="status-filters" class="segmented" role="group" aria-label="筛选任务状态"><button data-filter="all" class="selected">全部</button><button data-filter="active">进行中</button><button data-filter="attention">需关注</button><button data-filter="done">已完成</button></div><div class="filter-controls"><label class="sr-only" for="project-filter">筛选项目</label><select id="project-filter"><option value="">所有项目</option></select><label class="search-box"><span aria-hidden="true">⌕</span><input id="task-search" type="search" placeholder="搜索任务…" aria-label="搜索任务"></label></div></div>
+            <div id="task-list"></div>
+          </section>
+          <aside class="right-column">
+            <section class="panel agents-panel"><div class="panel-heading"><h2>协作应用</h2><span class="quiet-tag">MCP</span></div><div id="agent-list"></div><p class="panel-footnote">状态仅表示最近的 MCP 活动，不代表桌面应用正在运行。</p><button class="button secondary full" id="setup-button">配置应用接入 <span aria-hidden="true">↗</span></button></section>
+            <section class="panel activity-panel"><div class="panel-heading"><h2>最近动态</h2></div><div id="activity-list"></div></section>
+            <div class="local-boundary"><span aria-hidden="true">◇</span><p>当前由应用主动领取任务。<br>系统不会自动唤醒桌面聊天。</p></div>
+          </aside>
+        </div>
+      </section>
+      <section id="projects-view" class="hidden"><div class="section-note">登记项目的现有目录，集中查看协作任务。登记操作不会修改目录中的文件。</div><div id="project-list" class="project-grid"></div></section>
+      <section id="integration-view" class="hidden"><div id="integration-content"></div></section>
+      <footer class="page-footer"><span>跨应用协作系统</span><span>计划可追踪 · 交接有记录 · 决策由你掌握</span></footer>
+    </main>
+  </div>
+  <dialog id="project-dialog" class="form-dialog" aria-labelledby="project-dialog-title"><form id="project-form"><div class="dialog-heading"><div><span class="eyebrow">PROJECT</span><h2 id="project-dialog-title">添加项目目录</h2></div><button class="icon-button" type="button" data-close="project-dialog" aria-label="关闭">×</button></div><p class="dialog-description">连接本机已有项目。系统只登记路径，不移动或修改项目文件。</p><label>项目名称<input name="name" required maxlength="120" placeholder="例如：医疗辅助诊断平台" autocomplete="off"></label><label>项目绝对路径<input name="path" required maxlength="2048" placeholder="D:\我的项目" autocomplete="off" spellcheck="false"></label><p class="field-note">目录必须已经存在；建议为不同项目登记独立目录。</p><p class="form-error" role="alert"></p><div class="dialog-footer"><button type="button" class="button secondary" data-close="project-dialog">取消</button><button class="button primary" type="submit">添加项目</button></div></form></dialog>
+  <dialog id="task-dialog" class="form-dialog" aria-labelledby="task-dialog-title"><form id="task-form"><div class="dialog-heading"><div><span class="eyebrow">NEW TASK</span><h2 id="task-dialog-title">创建协作任务</h2></div><button class="icon-button" type="button" data-close="task-dialog" aria-label="关闭">×</button></div><p class="dialog-description">任务进入规划队列，由接入的 Codex 主动领取并编写计划。</p><label>所属项目<select name="projectId" id="task-project" required></select></label><label>任务名称<input name="title" required maxlength="200" placeholder="用一句话描述本轮目标" autocomplete="off"></label><label>需求与范围<textarea name="description" required rows="4" maxlength="20000" placeholder="要完成什么？哪些内容可以修改？"></textarea></label><label>验收标准<textarea name="acceptance" required rows="3" maxlength="10000" placeholder="哪些结果或检查通过后，才算完成？"></textarea></label><label class="compact-label">转人工判断的阻塞次数<input name="maxRetries" type="number" min="1" max="10" value="2" required></label><p class="field-note">达到次数后停止自动流转，等待你决定重试或由 Codex 接手。</p><p class="form-error" role="alert"></p><div class="dialog-footer"><button type="button" class="button secondary" data-close="task-dialog">取消</button><button class="button primary" type="submit">创建任务</button></div></form></dialog>
+  <dialog id="detail-dialog" class="detail-dialog" aria-labelledby="detail-title"><div id="detail-content"></div></dialog>
+  <dialog id="action-dialog" class="form-dialog" aria-labelledby="action-title"><form id="action-form"><div class="dialog-heading"><div><span class="eyebrow">TASK ACTION</span><h2 id="action-title"></h2></div><button class="icon-button" type="button" data-close="action-dialog" aria-label="关闭">×</button></div><p id="action-description" class="dialog-description"></p><label id="action-text-label"><span id="action-label-text"></span><textarea id="action-text" rows="6" maxlength="20000" required></textarea></label><label id="stopped-label" class="checkbox-label hidden"><input type="checkbox" id="stopped-check"><span>我已确认外部应用停止了这项任务的执行和文件修改。</span></label><p class="form-error" role="alert"></p><div class="dialog-footer"><button type="button" class="button secondary" data-close="action-dialog">取消</button><button id="action-submit" class="button primary" type="submit">确认</button></div></form></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

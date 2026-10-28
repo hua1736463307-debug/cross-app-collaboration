@@ -1,0 +1,23 @@
+{
+  "name": "cross-app-collaboration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "本地跨应用协作系统",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hua1736463307-debug/cross-app-collaboration.git"
+  },
+  "homepage": "https://github.com/hua1736463307-debug/cross-app-collaboration#readme",
+  "bugs": {
+    "url": "https://github.com/hua1736463307-debug/cross-app-collaboration/issues"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "mcp": "node src/mcp.mjs"
+  }
+}

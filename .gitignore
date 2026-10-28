@@ -1,0 +1,44 @@
+# Local runtime and credentials (never publish)
+/data/
+*.log
+*.token
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+node_modules/
+__pycache__/
+*.pyc
+
+# Local validation, source backups and execution history
+/.qa/
+/backups/
+/acceptance/
+/task_plan.md
+/findings.md
+/progress.md
+/.planning/
+/.plan-attestation
+
+# Machine-specific installation receipts and historical evidence
+/docs/*-receipt.json
+/docs/codex-health-summary.json
+/docs/phase2-diagnostics.json
+/docs/phase2-client-evidence.json
+/docs/desktop-mcp-verification.json
+/docs/desktop-mcp-status.md
+/docs/phase2-acceptance.md
+/docs/preview.jpg
+
+# Local app configuration and editor/OS files
+/.codex/
+/.agents/
+/.workbuddy/
+/.workbuddy-ai/
+/.aws/
+/.vscode/
+/.idea/
+.DS_Store
+Thumbs.db
