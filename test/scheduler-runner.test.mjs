@@ -42,6 +42,7 @@ async function setup(t, mode = 'success') {
     assert.ok(path.basename(temp).startsWith('cross-app-runner-test-'));
     fs.rmSync(temp, { recursive: true, force: true });
   });
+  hub.store.setModelSettings({ implementation: { model: 'fixture-explicit-model', effort: '' } });
   hub.server.listen(0, '127.0.0.1'); await once(hub.server, 'listening');
   const url = 'http://127.0.0.1:' + hub.server.address().port;
   const project = hub.store.createProject({ name: 'Scheduler fixture', path: projectDir });

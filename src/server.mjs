@@ -1,3 +1,4 @@
+import { lockDirectory } from './server-lock.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -25,26 +26,6 @@ async function body(req) {
     return value;
   } catch { throw new HubError('JSON 格式不正确'); }
 }
-function lockDirectory(dataDir) {
-  fs.mkdirSync(dataDir, { recursive: true });
-  const filename = path.join(dataDir, 'server.lock');
-  try {
-    fs.writeFileSync(filename, String(process.pid), { flag: 'wx' });
-  } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    const pid = Number(fs.readFileSync(filename, 'utf8'));
-    if (!Number.isInteger(pid) || pid <= 0) throw new Error('发现异常锁文件，请人工核对 ' + filename);
-    let alive = true;
-    try { process.kill(pid, 0); } catch (e) { if (e.code === 'ESRCH') alive = false; }
-    if (alive) throw new Error('此数据目录已被运行中的服务使用，请使用现有窗口。');
-    fs.unlinkSync(filename);
-    fs.writeFileSync(filename, String(process.pid), { flag: 'wx' });
-  }
-  return () => {
-    try { if (fs.readFileSync(filename, 'utf8') === String(process.pid)) fs.unlinkSync(filename); } catch {}
-  };
-}
-
 export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000, schedulerOptions = {} } = {}) {
   dataDir = path.resolve(dataDir);
   const unlock = lockDirectory(dataDir);
@@ -61,6 +42,8 @@ export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000, 
     store = new Store(path.join(dataDir, 'hub.sqlite'), { leaseMs });
   } catch (error) { unlock(); throw error; }
   let disposed = false;
+  const startedAt = new Date().toISOString();
+  const instanceId = randomBytes(8).toString('hex');
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -89,10 +72,22 @@ export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000, 
         throw new HubError('缺少本地工作台请求标记', 403);
       if (pathname === '/api/state' && req.method === 'GET') {
         return json(res, 200, { ...store.state(), scheduler: scheduler.state(), meta: {
-          version: '0.3.0', localOnly: true, capabilities: { autoWake: true, existingDesktopChatControl: false },
+          version: '0.3.0', localOnly: true, startedAt, instanceId, capabilities: { autoWake: true, existingDesktopChatControl: false, nativeCodeBuddyIsolation: true, taskSandboxDirectory: true },
           baseUrl: 'http://127.0.0.1:' + port
         } });
       }
+      if (pathname === '/api/shutdown' && req.method === 'POST') {
+        await body(req);
+        if (store.all('tasks').some(task => task.owner) || store.openDispatches().length)
+          throw new HubError('仍有执行中或尚未确认停止的任务。请先暂停任务并确认执行端停止，再退出系统。', 409);
+        scheduler.close();
+        json(res, 200, { stopping: true, instanceId });
+        server.close();
+        server.closeIdleConnections();
+        return;
+      }
+      const permission = pathname.match(/^\/api\/permissions\/([a-f0-9-]+)$/);
+      if (permission && req.method === 'POST') return json(res, 200, scheduler.decidePermission(permission[1], (await body(req)).allow));
       if (pathname === '/api/integration' && req.method === 'GET') {
         const config = actor => ({ mcpServers: {
           ['cross-app-' + actor]: { command: process.execPath, args: [path.join(root, 'src', 'mcp.mjs'), '--actor', actor],
@@ -115,6 +110,8 @@ export function createHub({ dataDir = path.join(root, 'data'), leaseMs = 90000, 
       if (pathname === '/api/scheduler' && req.method === 'POST') return json(res, 200, store.setSchedulerEnabled((await body(req)).enabled));
       if (pathname === '/api/scheduler/model-settings' && req.method === 'POST') return json(res, 200, store.setModelSettings(await body(req)));
       const taskModelSettings = pathname.match(/^\/api\/tasks\/([a-f0-9-]+)\/model-settings$/);
+      const taskSandbox = pathname.match(/^\/api\/tasks\/([a-f0-9-]+)\/sandbox$/);
+      if (taskSandbox && req.method === 'POST') return json(res, 200, store.setTaskSandbox(taskSandbox[1], await body(req)));
       if (taskModelSettings && req.method === 'POST') return json(res, 200, store.setTaskModelSettings(taskModelSettings[1], await body(req)));
       const automation = pathname.match(/^\/api\/tasks\/([a-f0-9-]+)\/automation$/);
       if (automation && req.method === 'POST') return json(res, 200, store.setTaskAutomation(automation[1], (await body(req)).enabled));

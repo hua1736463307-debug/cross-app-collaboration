@@ -17,6 +17,7 @@ function schema(properties, required = []) {
 }
 const taskLeaseSchema = (properties, required = []) => schema({ ...taskProperty, ...leaseProperty, ...properties }, ['taskId', 'leaseId', ...required]);
 const TOOLS = [
+  { name: 'create_planned_task', description: '仅 Codex 桌面对话：用户明确要求交付执行后，将已定稿计划创建为新任务，跳过规划直接进入 WorkBuddy 实施队列。先 list_tasks 选择已有项目；填写需求、范围、可执行步骤、验收和停止条件。automation=enabled 表示用户已授权该任务自动实施；仍遵守全局开关。requestId 使用唯一标识，重试必须原样复用全部参数，避免重复创建。不要在仅讨论方案时调用。', inputSchema: schema({ projectId: requiredString, title: requiredString, description: requiredString, acceptance: requiredString, plan: requiredString, requestId: requiredString, sandboxDirectory: { type: 'string', description: '用户授权的已有项目内绝对执行目录；未填写使用项目目录，计划文字不会扩大沙箱。' }, automation: { type: 'string', enum: ['enabled', 'disabled'] } }, ['projectId', 'title', 'description', 'acceptance', 'plan', 'requestId', 'automation']) },
   { name: 'list_tasks', description: '查看本应用可处理的任务和项目；不会启动或领取任务。', inputSchema: schema({}) },
   { name: 'get_task', description: '读取任务详情和完整交接包。先读任务范围、验收条件和已有证据；取消/断连后应先用此工具核对最终状态。', inputSchema: schema(taskProperty, ['taskId']) },
   { name: 'claim_task', description: '领取任务并获得独占协调租约。Codex 负责规划、诊断或人工安排的接手；WorkBuddy 负责实施。保存返回的 leaseId，每次任务级心跳和提交必须显式填写。共享桥不等于独立聊天；成功领取后才能工作。', inputSchema: schema(taskProperty, ['taskId']) },

@@ -22,7 +22,7 @@ const eventNames = {
   automation_enabled: '允许自动协作', automation_disabled: '关闭自动协作',
   dispatch_reserved: '预约执行', dispatch_started: '启动执行', dispatch_finished: '执行会话结束',
   dispatch_uncertain: '执行待核对', dispatch_resolved: '人工确认已停止',
-  scheduler_toggle: '调度开关', automation_toggle: '任务自动协作设置'
+  scheduler_toggle: '调度开关', automation_toggle: '任务自动协作设置', sandbox_scope: '执行范围授权', permission_decided: '工具审批'
 };
 const titles = {
   tasks: ['任务工作台', '让计划与实施，有序衔接。', 'Codex 负责规划与诊断，WorkBuddy 负责实施，你掌握关键决定。'],
@@ -121,11 +121,13 @@ async function copyText(text) {
 }
 function setOnline(success, error) {
   online = success;
+  $('#shutdown-button').disabled = !success;
+  if (success && state.meta?.startedAt) $('#service-instance').textContent = '启动于 ' + new Date(state.meta.startedAt).toLocaleString() + ' · ' + state.meta.instanceId;
   const service = $('#service-state');
   service.replaceChildren(element('i', 'status-dot ' + (success ? 'green' : 'red')), document.createTextNode(success ? '服务已连接' : '服务未连接'));
   const banner = $('#offline-banner');
   banner.classList.toggle('hidden', success);
-  if (!success) banner.textContent = '无法连接本地服务。请保持启动窗口运行。' + (hasState ? '下方保留最后一次读取的数据，暂不能提交操作。' : '') + (error ? ' ' + error : '');
+  if (!success) banner.textContent = '服务已停止或连接中断。双击“启动系统.cmd”后本页会自动重连，请核对新的启动时间和实例编号。' + (hasState ? '下方为最后读取的数据。' : '') + (error ? ' ' + error : '');
   $('#primary-action').disabled = !success;
   $$('button[data-mutation]').forEach(node => { node.disabled = !success || node.dataset.unavailable === 'true'; });
 }
@@ -149,6 +151,27 @@ async function refresh(force = false) {
   } finally { loading = false; }
 }
 function renderAll() {
+  const requests = state.scheduler?.permissions || [];
+  const permissionPanel = $('#permission-requests');
+  permissionPanel.replaceChildren();
+  permissionPanel.classList.toggle('hidden', !requests.length);
+  for (const request of requests) {
+    const row = element('div', 'panel-heading');
+    row.append(element('p', '', '权限请求 · ' + request.tool + ' · 任务 ' + request.taskId));
+    const details = element('pre', '', JSON.stringify(request.input, null, 2));
+    row.append(details);
+    row.append(element('p', 'side-note', '仅授权下面这一次工具调用；不会扩大沙箱目录或解除网络限制。5 分钟内未决定会拒绝。'));
+    for (const allow of [false, true]) {
+      const button = element('button', 'button secondary', allow ? '仅允许本次' : '拒绝');
+      button.disabled = !online;
+      button.addEventListener('click', async () => {
+        try { await api('/api/permissions/' + request.id, { allow }); await refresh(true); }
+        catch (error) { toast(error.message); }
+      });
+      row.append(button);
+    }
+    permissionPanel.append(row);
+  }
   $('#version').textContent = 'v' + (state.meta?.version || '0.1.0');
   renderProjectSelects();
   renderMetrics();
@@ -379,6 +402,8 @@ function renderDetail(id, preserve = false) {
   automation.append(element('h3', '', '自动协作'), element('span', 'status-badge ' + (task.autoEnabled ? 'teal' : ''), task.autoEnabled ? '此任务已授权' : '此任务未授权'));
   const modelButton = button('设置此任务模型', 'button secondary', () => openModelSettings(task));
   modelButton.disabled = !online; automation.append(modelButton);
+  automation.append(element('p', 'side-note', '原生沙箱执行目录：' + (task.sandboxDirectory || state.projects.find(p => p.id === task.projectId)?.path || '所属项目目录')));
+  automation.append(button('调整执行目录', 'button secondary', () => openSandboxSettings(task)));
   if (task.autoEnabled || !['done', 'review'].includes(task.status)) {
     const toggle = button(task.autoEnabled ? '关闭此任务自动协作' : '允许此任务自动协作', 'button secondary', () => openSchedulerAction({ type: 'task', taskId: id, enabled: !task.autoEnabled }));
     toggle.dataset.mutation = 'true';
@@ -454,19 +479,38 @@ async function submitForm(form, operation, done) {
   catch (error) { errorTarget.textContent = error.message; }
   finally { submit.disabled = false; }
 }
+function openSandboxSettings(task) {
+  const dialog = element('dialog', 'form-dialog');
+  const form = element('form');
+  form.append(element('h2', '', '授权执行目录'), element('p', 'dialog-description', '范围包含此目录及其子目录。仅接受所属项目内的现有目录，保护配置与工作台数据；网络默认禁止。保存不会自动重试，正在执行时不能更改。'));
+  const label = element('label', '', '执行目录（绝对路径）');
+  const input = element('input'); input.required = true; input.value = task.sandboxDirectory || projectOf(task)?.path || '';
+  label.append(input); form.append(label);
+  const error = element('p', 'form-error'); error.setAttribute('role', 'alert');
+  const footer = element('div', 'dialog-footer');
+  const save = element('button', 'button primary', '授权此目录'); save.type = 'submit';
+  footer.append(button('取消', 'button secondary', () => dialog.close()), save); form.append(error, footer);
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); save.disabled = true;
+    try { await api('/api/tasks/' + task.id + '/sandbox', { directory: input.value.trim() }); dialog.close(); await refresh(true); }
+    catch (e) { error.textContent = e.message; } finally { save.disabled = false; }
+  });
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+  dialog.append(form); document.body.append(dialog); dialog.showModal();
+}
 function openModelSettings(task = null) {
   if (!online) { toast('请先连接本地服务。', true); return; }
   const dialog = element('dialog', 'form-dialog');
   const form = element('form');
   const heading = element('div', 'dialog-heading');
   heading.append(element('h2', '', task ? '任务模型设置' : '默认模型设置'), button('×', 'icon-button', () => dialog.close()));
-  form.append(heading, element('p', 'dialog-description', task ? '留空表示跟随自动协作默认设置。修改只影响后续派发。' : '留空表示跟随对应客户端默认设置。修改只影响后续派发，不改变正在运行的会话。'));
+  form.append(heading, element('p', 'dialog-description', task ? '留空表示跟随自动协作默认设置。CodeBuddy 必须最终有用户选择的模型。修改只影响后续派发。' : 'Codex 留空可跟随客户端默认；CodeBuddy 实施必须明确选择模型。修改只影响后续派发，不改变正在运行的会话。'));
   const values = task ? task.modelSettings || {} : state.scheduler?.modelSettings || {};
   const controls = {};
   for (const [key, label] of [['planning', 'Codex 规划'], ['implementation', 'CodeBuddy 实施'], ['diagnosis', 'Codex 诊断与接手']]) {
     const section = element('section'); section.append(element('h3', '', label));
     const modelLabel = element('label', '', '模型 ID');
-    const model = element('input'); model.type = 'text'; model.maxLength = 100; model.placeholder = task ? '留空：跟随默认设置' : '留空：跟随客户端默认'; model.value = values[key]?.model || '';
+    const model = element('input'); model.type = 'text'; model.maxLength = 100; model.placeholder = task ? '留空：跟随默认设置' : key === 'implementation' ? '必须明确填写所选模型 ID' : '留空：跟随客户端默认'; model.value = values[key]?.model || '';
     modelLabel.append(model);
     const effortLabel = element('label', '', '推理强度');
     const effort = element('select');
@@ -540,6 +584,7 @@ function renderScheduler() {
     details.append(element('span', '', executionLabel), element('span', '', '开始 ' + time(run.startedAt, true)), element('span', '', run.pid ? '进程 ' + run.pid : '尚无进程编号'), element('span', '', run.handedOff ? '已收到任务交接' : '尚未确认任务交接'));
     details.append(element('span', '', '请求模型：' + (run.requestedModel?.model || '客户端默认') + ' / 强度：' + (run.requestedModel?.effort || '客户端默认')),
       element('span', '', '客户端报告模型：' + (run.reportedModel || '未确认') + ' / 强度：' + (run.reportedEffort || '未确认')));
+    if (run.sandboxDirectory) details.append(element('span', '', '本轮固定执行目录：' + run.sandboxDirectory));
     if (run.finishedAt) details.append(element('span', '', '结束 ' + time(run.finishedAt, true)));
     row.append(top, details);
     if (run.error) row.append(element('p', 'scheduler-run-error', textValue(run.error)));
@@ -696,6 +741,17 @@ $('#scheduler-form').addEventListener('submit', event => {
     $('#scheduler-dialog').close(); pendingSchedulerAction = null;
     toast(action.type === 'resolve' ? '已确认停止；请在任务详情决定是否重新安排' : '自动协作设置已保存');
   });
+});
+$('#shutdown-button').addEventListener('click', async () => {
+  if (!confirm('确认退出本地协作系统？其他工作台页面也会断开。再次使用请双击“启动系统.cmd”。')) return;
+  const button = $('#shutdown-button');
+  button.disabled = true;
+  try {
+    await api('/api/shutdown', {});
+    setOnline(false);
+    $('#service-state').textContent = '正在退出，等待连接断开';
+    toast('退出请求已接受');
+  } catch (error) { toast(error.message); button.disabled = !online; }
 });
 window.addEventListener('hashchange', () => navigate(location.hash.slice(1)));
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });

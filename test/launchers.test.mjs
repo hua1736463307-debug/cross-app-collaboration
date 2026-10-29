@@ -72,7 +72,7 @@ test('executor selection keeps workbuddy as the task role and labels the indepen
   configure(dir, { codex: file, workbuddy: file, executor: 'codebuddy' });
   const result = discoverLaunchers(dir);
   assert.equal(result.executor, 'codebuddy'); assert.equal(result.workbuddy, file);
-  assert.equal(launcherState(result).workbuddy.label, 'CodeBuddy Code 独立会话');
+  assert.equal(launcherState(result).workbuddy.label, 'CodeBuddy 原生沙箱独立会话');
 });
 
 test('Codex launcher explicitly retains workspace-write sandbox and automatic approval review', t => {
@@ -85,24 +85,22 @@ test('Codex launcher explicitly retains workspace-write sandbox and automatic ap
   assert.equal(spec.args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
 });
 
-test('independent CodeBuddy drops inherited WorkBuddy roots and preserves default approvals', t => {
+test('independent CodeBuddy drops inherited WorkBuddy roots and uses isolated native host', t => {
   const dir = temp(t);
   const contaminated = { CODEBUDDY_FORCE_LITE_WB_BUNDLE: '1', CODEBUDDY_CONFIG_DIR: 'fixture-workbuddy',
     WORKBUDDY_CONFIG_DIR: 'fixture-workbuddy', WORKBUDDY_DATA_FOLDER_NAME: '.workbuddy', WORKBUDDY_EXTRA_MODE: 'fixture',
     CODEBUDDY_CODE_DISABLE_BACKGROUND_TASKS: '0' };
   withEnvironment(contaminated, () => {
     const spec = buildLaunch({ actor: 'workbuddy', paths: { executor: 'codebuddy', workbuddy: path.join(dir, 'codebuddy.js') }, root,
-      dataDir: dir, url: 'http://127.0.0.1:4319', run: { id: 'fixture', taskId: 'fixture-task' }, project: { path: dir } });
+      dataDir: dir, url: 'http://127.0.0.1:4319', run: { id: 'fixture', taskId: 'fixture-task', requestedModel: {model:'chosen'} }, project: { path: dir } });
     for (const key of Object.keys(contaminated).filter(key => key !== 'CODEBUDDY_CODE_DISABLE_BACKGROUND_TASKS')) assert.equal(spec.env[key], undefined, key);
     assert.equal(spec.env.CODEBUDDY_CODE_DISABLE_BACKGROUND_TASKS, '1');
-    assert.equal(spec.args[spec.args.indexOf('--permission-mode') + 1], 'default');
-    const allowed = spec.args.slice(spec.args.indexOf('--allowedTools') + 1);
-    assert.equal(allowed.length, 11);
-    assert.ok(allowed.includes('mcp__cross-app-workbuddy__claim_task'));
-    assert.deepEqual(allowed.filter(rule => !rule.startsWith('mcp__')), projectFileRules(dir));
+    assert.deepEqual(spec.args, [path.join(root, 'src/codebuddy-host.mjs')]);
+    assert.equal(spec.host.model, 'chosen');
+    assert.equal(spec.host.cwd, dir);
+    assert.deepEqual(spec.host.protectedDirectories, [dir]);
     assert.equal(spec.env.CODEBUDDY_DEFER_TOOL_LOADING, '0');
-    assert.ok(spec.args.includes('--strict-mcp-config'));
-    const config = JSON.parse(fs.readFileSync(spec.args[spec.args.indexOf('--mcp-config') + 1], 'utf8'));
+    const config = spec.host;
     assert.deepEqual(Object.keys(config.mcpServers), ['cross-app-workbuddy']);
     assert.equal(config.mcpServers['cross-app-workbuddy'].defer_loading, false);
     assert.deepEqual(config.mcpServers['cross-app-workbuddy'].args.slice(-2), ['--actor', 'workbuddy']);
@@ -115,9 +113,8 @@ test('file scopes retain absolute Chinese and space-containing directories as si
   const expected = path.resolve(project).replace(/\\/g, '/') + '/**';
   assert.deepEqual(projectFileRules(project), ['Read', 'Edit', 'Write'].map(tool => tool + '(' + expected + ')'));
   const spec = buildLaunch({ actor: 'workbuddy', paths: { executor: 'codebuddy', workbuddy: path.join(dir, 'codebuddy.js') }, root,
-    dataDir: dir, url: 'http://127.0.0.1:4319', run: { id: 'fixture', taskId: 'fixture-task' }, project: { path: project } });
-  assert.ok(spec.args.includes('Write(' + expected + ')'));
-  assert.equal(spec.args.includes('Write'), false);
+    dataDir: dir, url: 'http://127.0.0.1:4319', run: { id: 'fixture', taskId: 'fixture-task', requestedModel: {model:'chosen'} }, project: { path: project } });
+  assert.equal(spec.host.cwd, project);
 });
 
 test('ambiguous file scopes fail closed instead of becoming wider permission rules', t => {
@@ -135,7 +132,7 @@ test('explicit dispatch model and effort are passed to each CLI without fallback
   assert.equal(codex.args[codex.args.indexOf('--model') + 1], 'test-model');
   assert.ok(codex.args.includes('model_reasoning_effort="high"'));
   const buddy = buildLaunch({ ...common, actor: 'workbuddy', paths: { executor: 'codebuddy', workbuddy: path.join(dir, 'codebuddy.js') } });
-  assert.equal(buddy.args[buddy.args.indexOf('--model') + 1], 'test-model');
-  assert.equal(buddy.args[buddy.args.indexOf('--effort') + 1], 'high');
+  assert.equal(buddy.host.model, 'test-model');
+  assert.equal(buddy.host.effort, 'high');
   assert.equal(buddy.args.includes('--fallback-model'), false);
 });

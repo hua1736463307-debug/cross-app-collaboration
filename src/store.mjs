@@ -92,6 +92,27 @@ export class Store {
     const settings = validateModelSettings(input);
     return this.tx(() => { const task = this.getTask(id); task.modelSettings = settings; this.save(task); this.event(id, 'model_settings', 'human', '更新了任务模型设置，新派发生效。'); return cleanTask(task); });
   }
+  sandboxDirectory(projectId, value) {
+    const project = this.getProject(projectId);
+    if (value === undefined || value === '') return project.path;
+    if (typeof value !== 'string' || !path.isAbsolute(value) || /[,()[\]{}*?!+@|\x00-\x1f\x7f]/u.test(value)) throw new HubError('执行目录必须为不含通配符的绝对路径');
+    let directory;
+    try { directory = fs.realpathSync(value); if (!fs.statSync(directory).isDirectory()) throw Error(); }
+    catch { throw new HubError('执行目录不存在或不可访问'); }
+    const relative = path.relative(project.path, directory);
+    if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new HubError('执行目录必须在所属项目内；跨项目操作请另建任务');
+    return directory;
+  }
+  setTaskSandbox(id, input) {
+    return this.tx(() => {
+      const task = this.getTask(id);
+      if (task.owner || this.openDispatches().some(run => run.taskId === id)) throw new HubError('请先停止当前执行并释放预约，再调整执行目录', 409);
+      task.sandboxDirectory = this.sandboxDirectory(task.projectId, text(input.directory, '执行目录', 2048));
+      this.save(task);
+      this.event(id, 'sandbox_scope', 'human', '用户设置执行目录：' + task.sandboxDirectory + '；仅后续派发生效，不会自动重试。');
+      return cleanTask(task);
+    });
+  }
   setSchedulerEnabled(enabled) {
     if (typeof enabled !== 'boolean') throw new HubError('调度开关必须为布尔值');
     return this.tx(() => {
@@ -143,6 +164,7 @@ export class Store {
       const defaults = this.modelSettings()[stage], override = validateModelSettings(task.modelSettings || {})[stage];
       const requestedModel = { model: override.model || defaults.model || null, effort: override.effort || defaults.effort || null };
       const run = { id: randomUUID(), taskId: task.id, actor, sourceStatus: task.status, revision: task.revision, stage, requestedModel, reportedModel: null, reportedEffort: null,
+        sandboxDirectory: task.sandboxDirectory || this.getProject(task.projectId).path,
         state: 'launching', startedAt: stamp(), claimedAt: null, pid: null, handedOff: false, finishedAt: null, error: null };
       this.db.prepare('INSERT INTO dispatches(id,body) VALUES(?,?)').run(run.id, JSON.stringify(run));
       this.event(task.id, 'dispatch_reserved', 'system', '已预约 ' + actor + ' 自动执行；等待客户端领取。');
@@ -237,7 +259,7 @@ export class Store {
       acceptance: text(input.acceptance, '验收条件'), status: 'planning_queue',
       plan: '', summary: '', evidence: '', blockedCount: 0, maxRetries: retries, revision: 0,
       owner: null, leaseId: null, heartbeatAt: null, pauseRequested: false, resumeStatus: null,
-      autoEnabled: false,
+      autoEnabled: false, sandboxDirectory: this.sandboxDirectory(input.projectId, input.sandboxDirectory),
       createdAt: stamp(), updatedAt: stamp()
     };
     return this.tx(() => {
@@ -283,6 +305,7 @@ export class Store {
     return [
       '# 跨应用协作任务单', '',
       '任务 ID：' + task.id, '项目：' + project.name, '工作目录：' + project.path,
+      '自动实施沙箱目录：' + (task.sandboxDirectory || project.path),
       '状态：' + task.status, '计划版本：' + task.revision,
       '', '## 目标', task.title, task.description, '', '## 验收条件', task.acceptance,
       '', '## 当前计划', task.plan || '等待 Codex 制定计划。', '', '## 最近执行摘要', task.summary || '尚未提交。',
@@ -317,6 +340,34 @@ export class Store {
     const readOnly = ['list_tasks', 'get_task'].includes(tool);
     if (dispatch && !readOnly && (dispatch.handedOff || !['launching', 'running'].includes(dispatch.state))) throw new HubError('本轮调度已结束或需人工处理，不能继续执行', 409);
     this.seen(actor);
+    if (tool === 'create_planned_task') {
+      if (actor !== 'codex' || dispatch) throw new HubError('仅桌面 Codex 会话可提交新计划任务', 403);
+      const requestId = text(args.requestId, '提交标识', 200);
+      const plan = text(args.plan, '计划');
+      if (!['enabled', 'disabled'].includes(args.automation)) throw new HubError('请明确选择 enabled 或 disabled 自动实施');
+      const payload = { projectId: args.projectId, title: text(args.title, '任务名称', 200),
+        description: text(args.description, '需求说明'), acceptance: text(args.acceptance, '验收条件'), plan, automation: args.automation };
+      this.getProject(payload.projectId);
+      if (args.sandboxDirectory !== undefined) payload.sandboxDirectory = this.sandboxDirectory(payload.projectId, args.sandboxDirectory);
+      return this.tx(() => {
+        const previous = this.all('tasks').find(t => t.desktopRequestId === requestId);
+        if (previous) {
+          if (JSON.stringify(previous.desktopSubmission) !== JSON.stringify(payload)) throw new HubError('提交标识已被其他内容使用', 409);
+          return { task: cleanTask(previous), packet: this.packet(previous.id), reused: true };
+        }
+        // Validate everything before inserting; creation and handoff share one transaction.
+        const task = { id: randomUUID(), projectId: payload.projectId, title: payload.title,
+          description: payload.description, acceptance: payload.acceptance, plan, status: 'ready',
+          summary: 'Codex 桌面对话已提交定稿计划。', evidence: '', blockedCount: 0, maxRetries: 2, revision: 1,
+          owner: null, leaseId: null, heartbeatAt: null, pauseRequested: false, resumeStatus: null,
+          autoEnabled: args.automation === 'enabled', sandboxDirectory: payload.sandboxDirectory || this.getProject(payload.projectId).path, createdAt: stamp(), updatedAt: stamp(),
+          desktopRequestId: requestId, desktopSubmission: payload };
+        this.db.prepare('INSERT INTO tasks(id,body) VALUES(?,?)').run(task.id, JSON.stringify(task));
+        this.event(task.id, 'plan_submitted', actor, '桌面对话创建任务并提交计划 v1\n' + plan);
+        return { task: cleanTask(task), packet: this.packet(task.id), reused: false,
+          message: '已跳过规划进入实施队列；自动执行还需全局自动协作开关开启。' };
+      });
+    }
     if (tool === 'list_tasks') {
       const statuses = actor === 'codex' ? ['planning_queue', 'blocked', 'codex_fix_queue'] : ['ready'];
       return { tasks: this.all('tasks').filter(t => dispatch ? t.id === dispatch.taskId : statuses.includes(t.status) || t.owner === actor).map(cleanTask), projects: this.all('projects').filter(p => !dispatch || p.id === this.getTask(dispatch.taskId).projectId) };

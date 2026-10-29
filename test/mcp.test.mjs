@@ -140,7 +140,7 @@ test('MCP negotiates supported protocols and advertises explicit-lease safety re
       assert.match(handshake.instructions, /停止所有相关写入及子任务/);
       assert.equal(handshake.serverInfo.name, 'cross-app-collaboration-codex');
       const response = await client.rpc('tools/list');
-      assert.equal(response.result.tools.length, 8);
+      assert.equal(response.result.tools.length, 9);
       const planTool = response.result.tools.find(t => t.name === 'submit_plan');
       assert.deepEqual(planTool.inputSchema.required, ['taskId', 'leaseId', 'plan']);
       assert.equal(planTool.inputSchema.additionalProperties, false);
@@ -242,7 +242,7 @@ test('MCP legacy batch returns one array with request results and no notificatio
       const response = await waitFor(() => client.allResponses.find(Array.isArray), 'batch results');
       assert.equal(response.length, 2);
       assert.deepEqual(response.find(r => r.id === 'batch-ping').result, {});
-      assert.equal(response.find(r => r.id === 'batch-tools').result.tools.length, 8);
+      assert.equal(response.find(r => r.id === 'batch-tools').result.tools.length, 9);
     });
   }
 });

@@ -28,5 +28,10 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
     if ($health.name -eq '跨应用协作系统') { $ready = $true; break }
   } catch {}
 }
-if (-not $ready) { throw ('启动失败，请查看：' + (Join-Path $dataDirectory 'server.err.log')) }
+if (-not $ready) {
+  $errorLog = Join-Path $dataDirectory 'server.err.log'
+  $detail = if (Test-Path -LiteralPath $errorLog) { (Get-Content -LiteralPath $errorLog -Tail 15 -Encoding UTF8) -join "`n" } else { '' }
+  if ([string]::IsNullOrWhiteSpace($detail)) { $detail = '服务未在等待时间内就绪，请检查端口占用或启动耗时。' }
+  throw ("启动失败：`n" + $detail + "`n日志位置：" + $errorLog)
+}
 if (-not $NoBrowser) { Start-Process $baseUrl }
